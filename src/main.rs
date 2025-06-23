@@ -82,8 +82,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                             "  - Doc ID: {}, Title: {:?}, Score: {:.4}",
                             result.doc.id, result.doc.title, result.score
                         );
-                        println!("    Snippet: {}", result.snippet);
-                        println!("    Path: {:?}\n", result.doc.path);
+                        println!("  - Snippet: {}", result.snippet);
+                        println!("  - Path: {:?}\n", result.doc.path);
                     }
                 }
                 println!("");

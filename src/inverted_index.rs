@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use colored::*;
 use regex;
-use strsim; // Added for fuzzy string matching
+use strsim;
 
 use serde::{Deserialize, Serialize};
 
@@ -22,13 +22,12 @@ use rayon::prelude::*;
 use lru::LruCache;
 use std::sync::{Arc, Mutex};
 
-// NEW: Add scraper imports for HTML parsing
 use scraper::{Html, Selector};
 
 // --- CONSTANTS ---
 const FUZZY_THRESHOLD: usize = 2; // Maximum Levenshtein distance for fuzzy matching
 
-// --- TYPE ALIASES for complex types to simplify declarations and aid compiler parsing ---
+// --- TYPE ALIASES ---
 type TermPostings = Vec<(u32, Vec<usize>)>;
 type DocumentPartialIndex = HashMap<String, Vec<usize>>;
 type ProcessedDocumentResult = Result<(Document, DocumentPartialIndex), io::Error>;
@@ -220,7 +219,6 @@ impl InvertedIndex {
                             distance
                         );
                     } else {
-                        // This should ideally not happen if find_fuzzy_matches only returns terms in index
                         return Vec::new();
                     }
                 } else {
@@ -278,7 +276,7 @@ impl InvertedIndex {
 
                 // Penalize fuzzy matches
                 if fuzzy_matched_terms.contains_key(q_token) {
-                    term_score *= 0.5; // Example penalty: half the score for fuzzy matches
+                    term_score *= 0.5;
                 }
 
                 score += term_score;
@@ -288,10 +286,9 @@ impl InvertedIndex {
 
         ranked_results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        let original_query_terms: Vec<String> = original_query
-            .split_whitespace()
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
+        let terms_to_highlight: Vec<String> = query_tokens
+            .iter()
+            .map(|q_token| fuzzy_matched_terms.get(q_token).unwrap_or(q_token).clone())
             .collect();
 
         ranked_results
@@ -301,11 +298,9 @@ impl InvertedIndex {
                     let content_lower = doc.content.to_lowercase();
 
                     let mut first_match_idx = None;
-                    // Find first occurrence of any query token (or its fuzzy match) for snippet generation
-                    for q_token in query_tokens {
-                        let actual_term_for_snippet =
-                            fuzzy_matched_terms.get(q_token).unwrap_or(q_token);
-                        if let Some(idx) = content_lower.find(actual_term_for_snippet) {
+                    for q_token in &terms_to_highlight {
+                        // Iterate over the actual terms to highlight
+                        if let Some(idx) = content_lower.find(q_token) {
                             first_match_idx = Some(idx);
                             break;
                         }
@@ -313,8 +308,8 @@ impl InvertedIndex {
 
                     let snippet = if let Some(start_char_idx) = first_match_idx {
                         let context_start = start_char_idx.saturating_sub(50);
-                        let context_end =
-                            (start_char_idx + query_tokens[0].len() + 50).min(content_lower.len());
+                        let context_end = (start_char_idx + terms_to_highlight[0].len() + 50)
+                            .min(content_lower.len());
 
                         let mut byte_start = 0;
                         for (i, (byte_idx, _)) in doc.content.char_indices().enumerate() {
@@ -334,8 +329,8 @@ impl InvertedIndex {
                         let snippet_text = &doc.content[byte_start..byte_end];
                         let mut highlighted_snippet = snippet_text.to_string();
 
-                        for original_term in &original_query_terms {
-                            let re_str = format!(r"(?i)\b{}\b", regex::escape(original_term));
+                        for term_to_highlight in &terms_to_highlight {
+                            let re_str = format!(r"(?i)\b{}\b", regex::escape(term_to_highlight));
                             let re = regex::Regex::new(&re_str).unwrap();
 
                             highlighted_snippet = re
@@ -442,12 +437,7 @@ impl InvertedIndex {
             .collect();
         ranked_results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        let original_phrase_terms: Vec<String> = original_query
-            .trim_matches('"')
-            .split_whitespace()
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect();
+        let terms_to_highlight_phrase: Vec<String> = query_stemmed_tokens.clone();
 
         ranked_results
             .into_iter()
@@ -481,8 +471,8 @@ impl InvertedIndex {
                         let snippet_text = &doc.content[byte_start..byte_end];
                         let mut highlighted_snippet = snippet_text.to_string();
 
-                        for original_term in &original_phrase_terms {
-                            let re_str = format!(r"(?i)\b{}\b", regex::escape(original_term));
+                        for term_to_highlight in &terms_to_highlight_phrase {
+                            let re_str = format!(r"(?i)\b{}\b", regex::escape(term_to_highlight));
                             let re = regex::Regex::new(&re_str).unwrap();
 
                             highlighted_snippet = re
@@ -520,10 +510,10 @@ impl InvertedIndex {
                 let file_path = entry.path();
                 if file_path.is_file() {
                     let extension = file_path.extension().and_then(|s| s.to_str());
-                    // Only include .txt, .md, .html for now
+                    // include .txt, .md, .html for now
                     match extension {
                         Some("txt") | Some("md") | Some("html") => Some(file_path),
-                        _ => None, // Ignore other file types for now
+                        _ => None, // Ignore other file types
                     }
                 } else {
                     None
@@ -544,22 +534,20 @@ impl InvertedIndex {
                     .to_string_lossy()
                     .to_string();
 
-                // NEW: Content extraction based on file type
+                // Content extraction based on file type
                 let content = match file_path.extension().and_then(|ext| ext.to_str()) {
                     Some("txt") | Some("md") => fs::read_to_string(&file_path)?,
                     Some("html") => {
                         let html_content = fs::read_to_string(&file_path)?;
                         let document = Html::parse_document(&html_content);
-                        // Select a common body or main content area, then extract text
-                        let selector = Selector::parse("body").unwrap(); // Assuming "body" contains main content
+                        let selector = Selector::parse("body").unwrap();
                         document
                             .select(&selector)
                             .next()
                             .map(|element| element.text().collect::<String>())
-                            .unwrap_or_else(|| "".to_string()) // If no body or text, return empty string
+                            .unwrap_or_else(|| "".to_string())
                     }
                     _ => {
-                        // This case should ideally not be reached due to the filter_map above
                         return Err(io::Error::new(
                             io::ErrorKind::Unsupported,
                             "Unsupported file type",
