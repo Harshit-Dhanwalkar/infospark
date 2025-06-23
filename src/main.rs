@@ -1,4 +1,5 @@
 // src/main.rs
+
 mod inverted_index;
 mod tokenizer;
 
@@ -8,11 +9,21 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-const INDEX_FILE: &str = "search_index.bin"; // File to save/load index
+use rustyline::error::ReadlineError;
+use rustyline::{DefaultEditor, Result as RlResult};
+
+const INDEX_FILE: &str = "search_index.bin";
+const HISTORY_FILE: &str = ".infospark_history";
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut index = InvertedIndex::new();
     let index_path = Path::new(INDEX_FILE);
+
+    let mut rl = DefaultEditor::new()?;
+
+    if rl.load_history(HISTORY_FILE).is_err() {
+        println!("No previous search history found.");
+    }
 
     // Try to load existing index
     if index_path.exists() {
@@ -27,7 +38,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         // If no index exists, build it from corpus
         let corpus_path = Path::new("corpus");
         println!(
-            "No existing index found. Loading documents from: {:?}",
+            "No existing index found. Loading documents from: {:?}\n",
             corpus_path
         );
         index.load_documents_from_directory(corpus_path)?;
@@ -44,34 +55,55 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     loop {
-        print!("Enter search query (or 'exit' to quit): ");
-        io::stdout().flush()?;
+        let readline = rl.readline("Enter search query (or 'exit' to quit): ");
 
-        let mut query = String::new();
-        io::stdin().read_line(&mut query)?;
-        let query = query.trim();
+        match readline {
+            Ok(line) => {
+                let query = line.trim();
 
-        if query.eq_ignore_ascii_case("exit") {
-            break;
-        }
+                if query.is_empty() {
+                    continue;
+                }
 
-        let results: Vec<SearchResult> = index.search(query);
+                rl.add_history_entry(line.as_str())?;
 
-        if results.is_empty() {
-            println!("No results found for '{}'", query);
-        } else {
-            println!("Results for '{}':", query);
-            for result in results {
-                println!(
-                    "  - Doc ID: {}, Title: {:?}, Score: {:.4}",
-                    result.doc.id, result.doc.title, result.score
-                );
-                println!("    Snippet: {}", result.snippet);
-                println!("    Path: {:?}", result.doc.path);
+                if query.eq_ignore_ascii_case("exit") {
+                    break;
+                }
+
+                let results: Vec<SearchResult> = index.search(query);
+
+                if results.is_empty() {
+                    println!("No results found for '{}'", query);
+                } else {
+                    println!("Results for '{}':", query);
+                    for result in results {
+                        println!(
+                            "  - Doc ID: {}, Title: {:?}, Score: {:.4}",
+                            result.doc.id, result.doc.title, result.score
+                        );
+                        println!("    Snippet: {}", result.snippet);
+                        println!("    Path: {:?}\n", result.doc.path);
+                    }
+                }
+                println!("");
+            }
+            Err(ReadlineError::Interrupted) => {
+                println!("\nCtrl-C received. Exiting.");
+                break;
+            }
+            Err(ReadlineError::Eof) => {
+                println!("\nCtrl-D received. Exiting.");
+                break;
+            }
+            Err(err) => {
+                println!("Error reading line: {:?}", err);
+                break;
             }
         }
-        println!("");
     }
+
+    rl.save_history(HISTORY_FILE)?;
 
     Ok(())
 }

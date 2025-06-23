@@ -14,3 +14,4 @@ bincode = { version = "2.0.1", features = ["serde"] }
 rayon = "1.10"
 lru = "0.14.0"
 strsim = "0.11.1"
+rustyline = "16.0.0"
