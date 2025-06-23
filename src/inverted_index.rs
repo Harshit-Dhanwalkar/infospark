@@ -1,7 +1,7 @@
 // src/inverted_index.rs
 
 use std::collections::HashMap;
-use std::error::Error;
+use std::error::Error as StdError;
 use std::fs;
 use std::io;
 use std::num::NonZeroUsize;
@@ -17,12 +17,14 @@ use serde::{Deserialize, Serialize};
 use bincode;
 use bincode::serde as bincode_serde;
 
-use rayon::prelude::*;
-
 use lru::LruCache;
 use std::sync::{Arc, Mutex};
 
 use scraper::{Html, Selector};
+
+use pdf_extract::extract_text;
+
+use anyhow::{Context, Result, anyhow};
 
 // --- CONSTANTS ---
 const FUZZY_THRESHOLD: usize = 2; // Maximum Levenshtein distance for fuzzy matching
@@ -30,7 +32,7 @@ const FUZZY_THRESHOLD: usize = 2; // Maximum Levenshtein distance for fuzzy matc
 // --- TYPE ALIASES ---
 type TermPostings = Vec<(u32, Vec<usize>)>;
 type DocumentPartialIndex = HashMap<String, Vec<usize>>;
-type ProcessedDocumentResult = Result<(Document, DocumentPartialIndex), io::Error>;
+type ProcessedDocumentResult = Result<(Document, DocumentPartialIndex)>;
 
 // --- STRUCTS ---
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,22 +83,23 @@ impl InvertedIndex {
     }
 
     // Persistence Methods
-    pub fn from_serialized_data(serialized_data: &[u8]) -> Result<Self, Box<dyn Error>> {
+    pub fn from_serialized_data(serialized_data: &[u8]) -> Result<Self> {
         let (mut index, _bytes_read): (InvertedIndex, usize) =
-            bincode_serde::decode_from_slice(serialized_data, bincode::config::standard())?;
+            bincode_serde::decode_from_slice(serialized_data, bincode::config::standard())
+                .context("Failed to decode index data from slice")?;
 
         let max_id = index.documents.keys().max().copied().unwrap_or(0);
         index.next_doc_id = AtomicU32::new(max_id + 1);
-        let non_zero_capacity = NonZeroUsize::new(index.cache_capacity).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "Cache capacity cannot be zero")
-        })?;
+        let non_zero_capacity =
+            NonZeroUsize::new(index.cache_capacity).context("Cache capacity cannot be zero")?;
         index.search_cache = Arc::new(Mutex::new(LruCache::new(non_zero_capacity)));
 
         Ok(index)
     }
 
-    pub fn to_serialized_data(&self) -> Result<Vec<u8>, Box<dyn Error>> {
-        let encoded_data = bincode_serde::encode_to_vec(self, bincode::config::standard())?;
+    pub fn to_serialized_data(&self) -> Result<Vec<u8>> {
+        let encoded_data = bincode_serde::encode_to_vec(self, bincode::config::standard())
+            .context("Failed to encode index data to vector")?;
         Ok(encoded_data)
     }
 
@@ -185,7 +188,7 @@ impl InvertedIndex {
     fn perform_keyword_search_and_rank(
         &self,
         query_tokens: &[String],
-        original_query: &str,
+        _original_query: &str,
     ) -> Vec<SearchResult> {
         let mut candidate_docs: HashMap<u32, HashMap<String, Vec<usize>>> = HashMap::new();
         let mut fuzzy_matched_terms: HashMap<String, String> = HashMap::new(); // query_token -> actual_matched_term
@@ -309,7 +312,7 @@ impl InvertedIndex {
                     let snippet = if let Some(start_char_idx) = first_match_idx {
                         let context_start = start_char_idx.saturating_sub(50);
                         let context_end = (start_char_idx + terms_to_highlight[0].len() + 50)
-                            .min(content_lower.len());
+                            .min(content_lower.len()); // Adjust based on first highlighted term
 
                         let mut byte_start = 0;
                         for (i, (byte_idx, _)) in doc.content.char_indices().enumerate() {
@@ -357,7 +360,7 @@ impl InvertedIndex {
     fn perform_phrase_search_and_rank(
         &self,
         phrase_query_text: &str,
-        original_query: &str,
+        _original_query: &str,
     ) -> Vec<SearchResult> {
         let query_tokens_with_pos = crate::tokenizer::tokenize(phrase_query_text);
 
@@ -472,6 +475,7 @@ impl InvertedIndex {
                         let mut highlighted_snippet = snippet_text.to_string();
 
                         for term_to_highlight in &terms_to_highlight_phrase {
+                            // Use stemmed tokens for highlighting
                             let re_str = format!(r"(?i)\b{}\b", regex::escape(term_to_highlight));
                             let re = regex::Regex::new(&re_str).unwrap();
 
@@ -496,12 +500,15 @@ impl InvertedIndex {
             .collect()
     }
 
-    pub fn load_documents_from_directory(&mut self, path: &Path) -> io::Result<()> {
+    // Helper function to extract text from a PDF file
+    fn extract_text_from_pdf(path: &Path) -> Result<String> {
+        let text = extract_text(path).context("Failed to extract text from PDF")?;
+        Ok(text)
+    }
+
+    pub fn load_documents_from_directory(&mut self, path: &Path) -> Result<()> {
         if !path.is_dir() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Provided path is not a directory",
-            ));
+            return Err(anyhow!("Provided path is not a directory"));
         }
 
         let file_paths: Vec<PathBuf> = fs::read_dir(path)?
@@ -510,10 +517,12 @@ impl InvertedIndex {
                 let file_path = entry.path();
                 if file_path.is_file() {
                     let extension = file_path.extension().and_then(|s| s.to_str());
-                    // include .txt, .md, .html for now
                     match extension {
-                        Some("txt") | Some("md") | Some("html") => Some(file_path),
-                        _ => None, // Ignore other file types
+                        Some("txt") | Some("md") | Some("html") | Some("pdf") => Some(file_path),
+                        _ => {
+                            println!("Skipping unsupported file type: {:?}", file_path);
+                            None
+                        }
                     }
                 } else {
                     None
@@ -524,7 +533,7 @@ impl InvertedIndex {
         let temp_next_doc_id = AtomicU32::new(self.next_doc_id.load(Ordering::SeqCst));
 
         let results: Vec<ProcessedDocumentResult> = file_paths
-            .par_iter()
+            .iter()
             .map(|file_path| {
                 println!("Indexing document ID (temp): {:?}", file_path);
                 let doc_id = temp_next_doc_id.fetch_add(1, Ordering::SeqCst);
@@ -534,25 +543,26 @@ impl InvertedIndex {
                     .to_string_lossy()
                     .to_string();
 
-                // Content extraction based on file type
                 let content = match file_path.extension().and_then(|ext| ext.to_str()) {
-                    Some("txt") | Some("md") => fs::read_to_string(&file_path)?,
+                    Some("txt") | Some("md") => fs::read_to_string(&file_path)
+                        .context("Failed to read text/markdown file")?,
                     Some("html") => {
-                        let html_content = fs::read_to_string(&file_path)?;
+                        let html_content =
+                            fs::read_to_string(&file_path).context("Failed to read HTML file")?;
                         let document = Html::parse_document(&html_content);
-                        let selector = Selector::parse("body").unwrap();
+                        let selector = Selector::parse("body")
+                            .map_err(|e| anyhow!("HTML Selector parse error: {}", e))?;
                         document
                             .select(&selector)
                             .next()
                             .map(|element| element.text().collect::<String>())
                             .unwrap_or_else(|| "".to_string())
                     }
-                    _ => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::Unsupported,
-                            "Unsupported file type",
-                        ));
-                    }
+                    Some("pdf") => Self::extract_text_from_pdf(&file_path)?,
+                    _ => Err(anyhow!(
+                        "Unsupported file type for indexing: {:?}",
+                        file_path
+                    ))?,
                 };
 
                 let doc = Document {
