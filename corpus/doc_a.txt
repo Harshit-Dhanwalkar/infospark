@@ -1,0 +1,1 @@
+Rust is a modern programming language known for its safety, speed, and concurrency. It is used for building reliable and efficient software.
