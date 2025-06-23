@@ -1,23 +1,27 @@
 // src/tokenizer.rs
-use rust_stemmers::{Algorithm, Stemmer}; // Import for stemming
+use rust_stemmers::{Algorithm, Stemmer};
 use std::collections::HashSet;
-use stop_words::{LANGUAGE, get}; // Import for stop words
+use stop_words::{LANGUAGE, get};
 
-// Initialize stop words set once (e.g., as a lazy static or in a constructor)
-// For simplicity in a function, we'll create it each time for now,
-// but for performance, you'd want to initialize it once.
 lazy_static::lazy_static! {
     static ref STOP_WORDS: HashSet<String> = get(LANGUAGE::English).into_iter().collect();
 }
 
-pub fn tokenize(text: &str) -> Vec<String> {
-    let en_stemmer = Stemmer::create(Algorithm::English); // Create English stemmer
+pub fn tokenize(text: &str) -> Vec<(String, usize)> {
+    let en_stemmer = Stemmer::create(Algorithm::English);
+    let mut tokens_with_positions = Vec::new();
+    let mut current_word_index = 0;
 
     text.to_lowercase()
-        .split(|c: char| !c.is_alphanumeric()) // Split by anything that's not alphanumeric
-        .filter(|s| !s.is_empty()) // Remove empty strings from consecutive delimiters
-        .map(|s| s.to_string())
-        .filter(|s| !STOP_WORDS.contains(s)) // Filter out stop words
-        .map(|s| en_stemmer.stem(&s).to_string()) // Apply stemming
-        .collect()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .for_each(|s| {
+            let token_string = s.to_string();
+            if !STOP_WORDS.contains(&token_string) {
+                let stemmed_token = en_stemmer.stem(&token_string).to_string();
+                tokens_with_positions.push((stemmed_token, current_word_index));
+                current_word_index += 1; // Increment position for the next valid word
+            }
+        });
+    tokens_with_positions
 }

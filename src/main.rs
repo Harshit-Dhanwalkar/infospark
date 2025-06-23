@@ -4,14 +4,13 @@ mod tokenizer;
 
 use inverted_index::{InvertedIndex, SearchResult};
 use std::error::Error;
-use std::fs; // For file operations
+use std::fs;
 use std::io::{self, Write};
-use std::path::Path; // For returning a boxed error
+use std::path::Path;
 
 const INDEX_FILE: &str = "search_index.bin"; // File to save/load index
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // Change main to return a Boxed Error
     let mut index = InvertedIndex::new();
     let index_path = Path::new(INDEX_FILE);
 
@@ -66,7 +65,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 println!(
                     "  - Doc ID: {}, Title: {:?}, Score: {:.4}",
                     result.doc.id, result.doc.title, result.score
-                ); // More precision for scores
+                );
                 println!("    Snippet: {}", result.snippet);
                 println!("    Path: {:?}", result.doc.path);
             }

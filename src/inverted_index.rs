@@ -6,7 +6,7 @@ use std::fs;
 use std::io;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering}; // Required for LruCache capacity
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use colored::*;
 use regex;
@@ -16,18 +16,18 @@ use serde::{Deserialize, Serialize};
 use bincode;
 use bincode::serde as bincode_serde;
 
-use rayon::prelude::*; // FIXED: Added this import for parallel processing
+use rayon::prelude::*;
 
 use lru::LruCache;
 use std::sync::{Arc, Mutex};
 
-// --- TYPE ALIASES for complex types to simplify declarations and aid compiler parsing ---
-type TermPostings = Vec<(u32, usize)>;
-type DocumentPartialIndex = HashMap<String, TermPostings>;
+// --- TYPE ALIASES ---
+type TermPostings = Vec<(u32, Vec<usize>)>;
+type DocumentPartialIndex = HashMap<String, Vec<usize>>;
 type ProcessedDocumentResult = Result<(Document, DocumentPartialIndex), io::Error>;
 
 // --- STRUCTS ---
-#[derive(Debug, Clone, Serialize, Deserialize)] // Use serde's Serialize/Deserialize directly
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
     pub id: u32,
     pub path: PathBuf,
@@ -44,31 +44,25 @@ pub struct SearchResult {
 
 // Helper function for default LruCache initialization
 fn default_search_cache() -> Arc<Mutex<LruCache<String, Vec<SearchResult>>>> {
-    // This function provides a default instance for Serde when deserializing,
-    // even though the field is skipped. The actual cache capacity will be
-    // re-initialized correctly in `from_serialized_data`.
-    // We use a dummy non-zero value here, as it will be immediately overwritten.
     let non_zero_capacity = NonZeroUsize::new(1).expect("Capacity must be non-zero");
     Arc::new(Mutex::new(LruCache::new(non_zero_capacity)))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InvertedIndex {
-    index: HashMap<String, TermPostings>, // Using type alias
+    index: HashMap<String, TermPostings>,
     documents: HashMap<u32, Document>,
-    #[serde(skip)] // Atomic types cannot be directly serialized by serde
+    #[serde(skip)]
     next_doc_id: AtomicU32,
     total_docs: usize,
-    #[serde(skip, default = "default_search_cache")] // FIXED: Add default function for Serde
+    #[serde(skip, default = "default_search_cache")]
     search_cache: Arc<Mutex<LruCache<String, Vec<SearchResult>>>>,
-    // REMOVED: #[serde(skip, default)] - cache_capacity now gets serialized normally
     cache_capacity: usize,
 }
 
 impl InvertedIndex {
     pub fn new() -> Self {
-        const DEFAULT_CACHE_CAPACITY: usize = 100; // Define capacity here
-        // Ensure capacity is non-zero, unwrap is safe as 100 is not zero
+        const DEFAULT_CACHE_CAPACITY: usize = 100;
         let non_zero_capacity = NonZeroUsize::new(DEFAULT_CACHE_CAPACITY).unwrap();
         InvertedIndex {
             index: HashMap::new(),
@@ -86,10 +80,7 @@ impl InvertedIndex {
             bincode_serde::decode_from_slice(serialized_data, bincode::config::standard())?;
 
         let max_id = index.documents.keys().max().copied().unwrap_or(0);
-        // Re-initialize the AtomicU32 as it was skipped during serialization
         index.next_doc_id = AtomicU32::new(max_id + 1);
-        // Re-initialize the cache as it was skipped during serialization
-        // Ensure capacity is non-zero, with proper error handling for safety
         let non_zero_capacity = NonZeroUsize::new(index.cache_capacity).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "Cache capacity cannot be zero")
         })?;
@@ -103,7 +94,7 @@ impl InvertedIndex {
         Ok(encoded_data)
     }
 
-    #[allow(dead_code)] // Added to suppress the unused method warning
+    #[allow(dead_code)]
     pub fn add_document(&mut self, doc: Document) {
         let doc_id = self.next_doc_id.fetch_add(1, Ordering::SeqCst);
         let current_doc = Document {
@@ -113,22 +104,25 @@ impl InvertedIndex {
             title: doc.title,
         };
 
-        let tokens = crate::tokenizer::tokenize(&current_doc.content);
-        let mut doc_term_frequencies: HashMap<String, usize> = HashMap::new();
-        for token in tokens {
-            *doc_term_frequencies.entry(token).or_insert(0) += 1;
+        let tokens_with_positions = crate::tokenizer::tokenize(&current_doc.content);
+        let mut doc_token_positions: HashMap<String, Vec<usize>> = HashMap::new();
+        for (token, pos) in tokens_with_positions {
+            doc_token_positions
+                .entry(token)
+                .or_insert_with(Vec::new)
+                .push(pos);
         }
 
-        for (token, count) in doc_term_frequencies {
+        for (token, positions) in doc_token_positions {
             self.index
                 .entry(token)
                 .or_insert_with(Vec::new)
-                .push((doc_id, count));
+                .push((doc_id, positions));
         }
 
         self.documents.insert(doc_id, current_doc);
         self.total_docs += 1;
-        self.clear_cache(); // Clear cache when index is modified
+        self.clear_cache();
     }
 
     fn clear_cache(&self) {
@@ -136,56 +130,62 @@ impl InvertedIndex {
         cache.clear();
     }
 
-    // Refactored search function to explicitly manage 'results' assignment
     pub fn search(&self, query: &str) -> Vec<SearchResult> {
-        let query_tokens = crate::tokenizer::tokenize(query);
-        if query_tokens.is_empty() {
+        if query.is_empty() {
             return Vec::new();
         }
 
-        // --- Caching Logic ---
         {
-            let mut cache = self.search_cache.lock().unwrap(); // Acquire lock
+            let mut cache = self.search_cache.lock().unwrap();
             if let Some(results) = cache.get(query) {
-                return results.clone(); // Return cloned results from cache
+                return results.clone();
             }
-        } // Lock is automatically released here when `cache` goes out of scope
+        }
 
-        // If not in cache, perform the actual search and assign to 'results'
-        let results = self.perform_search_and_rank(&query_tokens, query);
+        let results = if query.starts_with('"') && query.ends_with('"') && query.len() > 1 {
+            // hrase query
+            let phrase_content = &query[1..query.len() - 1]; // Remove quotes
+            self.perform_phrase_search_and_rank(phrase_content, query)
+        } else {
+            // regular keyword query
+            let query_tokens_with_pos = crate::tokenizer::tokenize(query);
+            let query_tokens: Vec<String> = query_tokens_with_pos
+                .iter()
+                .map(|(s, _)| s.clone())
+                .collect();
+            self.perform_keyword_search_and_rank(&query_tokens, query)
+        };
 
-        // Store in cache after computation
         {
-            let mut cache = self.search_cache.lock().unwrap(); // Acquire lock
+            let mut cache = self.search_cache.lock().unwrap();
             cache.put(query.to_string(), results.clone());
-        } // Lock automatically released here
+        }
 
-        results // Return the computed and cached results
+        results
     }
 
-    // Helper function to separate the core search and ranking logic
-    fn perform_search_and_rank(
+    // Helper function for keyword search
+    fn perform_keyword_search_and_rank(
         &self,
         query_tokens: &[String],
         original_query: &str,
     ) -> Vec<SearchResult> {
-        let mut candidate_docs: HashMap<u32, HashMap<String, usize>> = HashMap::new();
+        let mut candidate_docs: HashMap<u32, HashMap<String, Vec<usize>>> = HashMap::new();
 
         for token in query_tokens {
             if let Some(doc_entries) = self.index.get(token) {
-                for (doc_id, tf) in doc_entries {
+                for (doc_id, positions) in doc_entries {
                     candidate_docs
                         .entry(*doc_id)
                         .or_insert_with(HashMap::new)
-                        .insert(token.clone(), *tf);
+                        .insert(token.clone(), positions.clone());
                 }
             } else {
-                // If any query token is not found, no results
-                return Vec::new(); // Return empty early
+                return Vec::new(); // If any query token is not found, no result
             }
         }
 
-        let mut intersection_results: HashMap<u32, HashMap<String, usize>> = HashMap::new();
+        let mut intersection_results: HashMap<u32, HashMap<String, Vec<usize>>> = HashMap::new();
         for (doc_id, term_map) in candidate_docs {
             let mut all_terms_present = true;
             for q_token in query_tokens {
@@ -201,10 +201,10 @@ impl InvertedIndex {
 
         let mut ranked_results: Vec<(f64, u32)> = Vec::new();
 
-        for (doc_id, term_frequencies) in intersection_results {
+        for (doc_id, term_frequencies_and_pos) in intersection_results {
             let mut score = 0.0;
             for q_token in query_tokens {
-                let tf = *term_frequencies.get(q_token).unwrap_or(&0) as f64;
+                let tf = term_frequencies_and_pos.get(q_token).map_or(0, |v| v.len()) as f64;
 
                 if tf == 0.0 {
                     continue;
@@ -245,9 +245,7 @@ impl InvertedIndex {
                         }
                     }
 
-                    let snippet;
-
-                    if let Some(start_char_idx) = first_match_idx {
+                    let snippet = if let Some(start_char_idx) = first_match_idx {
                         let context_start = start_char_idx.saturating_sub(50);
                         let context_end =
                             (start_char_idx + query_tokens[0].len() + 50).min(content_lower.len());
@@ -280,10 +278,161 @@ impl InvertedIndex {
                                 })
                                 .to_string();
                         }
-                        snippet = format!("...{}...", highlighted_snippet);
+                        format!("...{}...", highlighted_snippet)
                     } else {
-                        snippet = format!("{}...", &doc.content[..doc.content.len().min(150)]);
+                        format!("{}...", &doc.content[..doc.content.len().min(150)])
+                    };
+
+                    SearchResult {
+                        doc,
+                        score,
+                        snippet,
                     }
+                })
+            })
+            .collect()
+    }
+
+    // Helper function for phrase search
+    fn perform_phrase_search_and_rank(
+        &self,
+        phrase_query_text: &str,
+        original_query: &str,
+    ) -> Vec<SearchResult> {
+        let query_tokens_with_pos = crate::tokenizer::tokenize(phrase_query_text);
+
+        if query_tokens_with_pos.is_empty() {
+            return Vec::new();
+        }
+
+        let query_stemmed_tokens: Vec<String> = query_tokens_with_pos
+            .iter()
+            .map(|(s, _)| s.clone())
+            .collect();
+
+        // Find documents that contain all query tokens
+        let mut common_docs_data: HashMap<u32, HashMap<String, Vec<usize>>> = HashMap::new();
+
+        for (token_idx, token) in query_stemmed_tokens.iter().enumerate() {
+            if let Some(doc_entries) = self.index.get(token) {
+                if token_idx == 0 {
+                    // For the first token, initialize common_docs_data with its documents
+                    for (doc_id, positions) in doc_entries {
+                        common_docs_data
+                            .entry(*doc_id)
+                            .or_insert_with(HashMap::new)
+                            .insert(token.clone(), positions.clone());
+                    }
+                } else {
+                    let current_matches_for_token: HashMap<u32, Vec<usize>> = doc_entries
+                        .iter()
+                        .map(|(id, pos)| (*id, pos.clone()))
+                        .collect();
+
+                    common_docs_data
+                        .retain(|doc_id, _| current_matches_for_token.contains_key(doc_id));
+
+                    for (doc_id, positions) in current_matches_for_token {
+                        if let Some(doc_token_map) = common_docs_data.get_mut(&doc_id) {
+                            doc_token_map.insert(token.clone(), positions);
+                        }
+                    }
+                }
+            } else {
+                return Vec::new();
+            }
+        }
+
+        let mut phrase_matching_docs: HashMap<u32, f64> = HashMap::new();
+
+        for (doc_id, doc_tokens_pos_map) in common_docs_data {
+            if let Some(first_token_positions) = doc_tokens_pos_map.get(&query_stemmed_tokens[0]) {
+                for &start_pos in first_token_positions {
+                    let mut is_phrase_match = true;
+                    for i in 1..query_stemmed_tokens.len() {
+                        let current_query_token = &query_stemmed_tokens[i];
+                        let expected_pos = start_pos + (i as usize);
+
+                        if let Some(doc_token_positions) =
+                            doc_tokens_pos_map.get(current_query_token)
+                        {
+                            if !doc_token_positions.contains(&expected_pos) {
+                                is_phrase_match = false;
+                                break;
+                            }
+                        } else {
+                            is_phrase_match = false;
+                            break;
+                        }
+                    }
+
+                    if is_phrase_match {
+                        *phrase_matching_docs.entry(doc_id).or_insert(0.0) += 1.0; // Increment score for each phrase match
+                    }
+                }
+            }
+        }
+
+        let mut ranked_results: Vec<(f64, u32)> = phrase_matching_docs
+            .into_iter()
+            .map(|(doc_id, score)| (score, doc_id))
+            .collect();
+        ranked_results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let original_phrase_terms: Vec<String> = original_query
+            .trim_matches('"')
+            .split_whitespace()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+
+        ranked_results
+            .into_iter()
+            .filter_map(|(score, doc_id)| {
+                self.documents.get(&doc_id).cloned().map(|doc| {
+                    let content_lower = doc.content.to_lowercase();
+                    let snippet_highlight_target = phrase_query_text.to_lowercase();
+
+                    let snippet = if let Some(first_match_idx) =
+                        content_lower.find(&snippet_highlight_target)
+                    {
+                        let context_start = first_match_idx.saturating_sub(50);
+                        let context_end = (first_match_idx + snippet_highlight_target.len() + 50)
+                            .min(content_lower.len());
+
+                        let mut byte_start = 0;
+                        for (i, (byte_idx, _)) in doc.content.char_indices().enumerate() {
+                            if i == context_start {
+                                byte_start = byte_idx;
+                                break;
+                            }
+                        }
+                        let mut byte_end = doc.content.len();
+                        for (i, (byte_idx, _)) in doc.content.char_indices().enumerate() {
+                            if i == context_end {
+                                byte_end = byte_idx;
+                                break;
+                            }
+                        }
+
+                        let snippet_text = &doc.content[byte_start..byte_end];
+                        let mut highlighted_snippet = snippet_text.to_string();
+
+                        // Highlight original terms in the snippet
+                        for original_term in &original_phrase_terms {
+                            let re_str = format!(r"(?i)\b{}\b", regex::escape(original_term));
+                            let re = regex::Regex::new(&re_str).unwrap();
+
+                            highlighted_snippet = re
+                                .replace_all(&highlighted_snippet, |caps: &regex::Captures| {
+                                    caps[0].red().bold().to_string()
+                                })
+                                .to_string();
+                        }
+                        format!("...{}...", highlighted_snippet)
+                    } else {
+                        format!("{}...", &doc.content[..doc.content.len().min(150)])
+                    };
 
                     SearchResult {
                         doc,
@@ -303,7 +452,6 @@ impl InvertedIndex {
             ));
         }
 
-        // Collect all file paths first
         let file_paths: Vec<PathBuf> = fs::read_dir(path)?
             .filter_map(|entry| {
                 let entry = entry.ok()?;
@@ -316,14 +464,12 @@ impl InvertedIndex {
             })
             .collect();
 
-        // Use a temporary AtomicU32 for parallel ID generation
         let temp_next_doc_id = AtomicU32::new(self.next_doc_id.load(Ordering::SeqCst));
 
-        // Process documents in parallel using the new type alias
         let results: Vec<ProcessedDocumentResult> = file_paths
-            .par_iter() // This makes the iterator parallel
+            .par_iter()
             .map(|file_path| {
-                println!("Indexing document ID (temp): {:?}", file_path); // temp ID for debug
+                println!("Indexing document ID (temp): {:?}", file_path);
                 let doc_id = temp_next_doc_id.fetch_add(1, Ordering::SeqCst);
                 let content = fs::read_to_string(&file_path)?;
                 let title = file_path
@@ -333,50 +479,43 @@ impl InvertedIndex {
                     .to_string();
 
                 let doc = Document {
-                    id: doc_id, // Assign the new ID
+                    id: doc_id,
                     path: file_path.clone(),
                     content: content,
                     title: title,
                 };
 
-                let tokens = crate::tokenizer::tokenize(&doc.content);
-                let mut doc_term_frequencies: HashMap<String, usize> = HashMap::new();
-                for token in tokens {
-                    *doc_term_frequencies.entry(token).or_insert(0) += 1;
-                }
-
-                let mut partial_index_entries = HashMap::new();
-                for (token, count) in doc_term_frequencies {
+                let tokens_with_positions = crate::tokenizer::tokenize(&doc.content);
+                let mut partial_index_entries: HashMap<String, Vec<usize>> = HashMap::new();
+                for (token, pos) in tokens_with_positions {
                     partial_index_entries
                         .entry(token)
                         .or_insert_with(Vec::new)
-                        .push((doc_id, count));
+                        .push(pos);
                 }
-
                 Ok((doc, partial_index_entries))
             })
-            .collect(); // Collect results from parallel processing
+            .collect();
 
-        // Merge results back into the main InvertedIndex on the main thread
         let mut new_docs_count = 0;
         for result in results {
-            let (doc, partial_index_entries) = result?; // Propagate errors
-            let doc_id = doc.id; // Get the assigned ID
+            let (doc, partial_index_entries) = result?;
+            let doc_id = doc.id;
 
             self.documents.insert(doc_id, doc);
             new_docs_count += 1;
 
-            for (token, postings) in partial_index_entries {
+            for (token, positions) in partial_index_entries {
                 self.index
                     .entry(token)
                     .or_insert_with(Vec::new)
-                    .extend(postings); // Extend with the postings for this doc
+                    .push((doc_id, positions));
             }
         }
 
         self.total_docs += new_docs_count;
-        self.next_doc_id = temp_next_doc_id; // Update the main AtomicU32
-        self.clear_cache(); // Clear cache after indexing
+        self.next_doc_id = temp_next_doc_id;
+        self.clear_cache();
         Ok(())
     }
 
