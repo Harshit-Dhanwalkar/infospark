@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use colored::*;
 use regex;
-use strsim;
+use strsim; // Added for fuzzy string matching
 
 use serde::{Deserialize, Serialize};
 
@@ -22,10 +22,13 @@ use rayon::prelude::*;
 use lru::LruCache;
 use std::sync::{Arc, Mutex};
 
+// NEW: Add scraper imports for HTML parsing
+use scraper::{Html, Selector};
+
 // --- CONSTANTS ---
 const FUZZY_THRESHOLD: usize = 2; // Maximum Levenshtein distance for fuzzy matching
 
-// --- TYPE ALIASES ---
+// --- TYPE ALIASES for complex types to simplify declarations and aid compiler parsing ---
 type TermPostings = Vec<(u32, Vec<usize>)>;
 type DocumentPartialIndex = HashMap<String, Vec<usize>>;
 type ProcessedDocumentResult = Result<(Document, DocumentPartialIndex), io::Error>;
@@ -35,7 +38,7 @@ type ProcessedDocumentResult = Result<(Document, DocumentPartialIndex), io::Erro
 pub struct Document {
     pub id: u32,
     pub path: PathBuf,
-    pub content: String,
+    pub content: String, // Storing processed plain text content
     pub title: String,
 }
 
@@ -166,7 +169,7 @@ impl InvertedIndex {
         results
     }
 
-    // NEW: Helper function to find fuzzy matches for a token
+    // Helper function to find fuzzy matches for a token
     fn find_fuzzy_matches(&self, query_token: &str) -> Vec<(String, usize)> {
         let mut fuzzy_matches = Vec::new();
         for (indexed_term, _) in &self.index {
@@ -175,7 +178,7 @@ impl InvertedIndex {
                 fuzzy_matches.push((indexed_term.clone(), distance));
             }
         }
-        // Sort by distance so closest matches are considered first
+        // Sort by distance so closest matches are considered first (optional)
         fuzzy_matches.sort_by_key(|(_, distance)| *distance);
         fuzzy_matches
     }
@@ -186,7 +189,7 @@ impl InvertedIndex {
         original_query: &str,
     ) -> Vec<SearchResult> {
         let mut candidate_docs: HashMap<u32, HashMap<String, Vec<usize>>> = HashMap::new();
-        let mut fuzzy_matched_terms: HashMap<String, String> = HashMap::new();
+        let mut fuzzy_matched_terms: HashMap<String, String> = HashMap::new(); // query_token -> actual_matched_term
 
         for token in query_tokens {
             if let Some(doc_entries) = self.index.get(token) {
@@ -207,7 +210,7 @@ impl InvertedIndex {
                             candidate_docs
                                 .entry(*doc_id)
                                 .or_insert_with(HashMap::new)
-                                .insert(closest_match.clone(), positions.clone());
+                                .insert(closest_match.clone(), positions.clone()); // Store with actual matched term
                         }
                         fuzzy_matched_terms.insert(token.clone(), closest_match.clone());
                         println!(
@@ -217,6 +220,7 @@ impl InvertedIndex {
                             distance
                         );
                     } else {
+                        // This should ideally not happen if find_fuzzy_matches only returns terms in index
                         return Vec::new();
                     }
                 } else {
@@ -233,6 +237,7 @@ impl InvertedIndex {
         for (doc_id, term_map) in candidate_docs {
             let mut all_terms_present = true;
             for q_token in query_tokens {
+                // Check if the original query token or its fuzzy match is present
                 if !term_map.contains_key(q_token)
                     && !term_map
                         .contains_key(fuzzy_matched_terms.get(q_token).unwrap_or(&String::new()))
@@ -251,7 +256,7 @@ impl InvertedIndex {
         for (doc_id, term_frequencies_and_pos) in intersection_results {
             let mut score = 0.0;
             for q_token in query_tokens {
-                let actual_term = fuzzy_matched_terms.get(q_token).unwrap_or(q_token);
+                let actual_term = fuzzy_matched_terms.get(q_token).unwrap_or(q_token); // Use fuzzy matched term if available
 
                 let tf = term_frequencies_and_pos
                     .get(actual_term)
@@ -273,7 +278,7 @@ impl InvertedIndex {
 
                 // Penalize fuzzy matches
                 if fuzzy_matched_terms.contains_key(q_token) {
-                    term_score *= 0.5;
+                    term_score *= 0.5; // Example penalty: half the score for fuzzy matches
                 }
 
                 score += term_score;
@@ -296,6 +301,7 @@ impl InvertedIndex {
                     let content_lower = doc.content.to_lowercase();
 
                     let mut first_match_idx = None;
+                    // Find first occurrence of any query token (or its fuzzy match) for snippet generation
                     for q_token in query_tokens {
                         let actual_term_for_snippet =
                             fuzzy_matched_terms.get(q_token).unwrap_or(q_token);
@@ -369,13 +375,11 @@ impl InvertedIndex {
             .map(|(s, _)| s.clone())
             .collect();
 
-        // Find documents that contain all query tokens
         let mut common_docs_data: HashMap<u32, HashMap<String, Vec<usize>>> = HashMap::new();
 
         for (token_idx, token) in query_stemmed_tokens.iter().enumerate() {
             if let Some(doc_entries) = self.index.get(token) {
                 if token_idx == 0 {
-                    // For the first token, initialize common_docs_data with its documents
                     for (doc_id, positions) in doc_entries {
                         common_docs_data
                             .entry(*doc_id)
@@ -514,8 +518,13 @@ impl InvertedIndex {
             .filter_map(|entry| {
                 let entry = entry.ok()?;
                 let file_path = entry.path();
-                if file_path.is_file() && file_path.extension().map_or(false, |ext| ext == "txt") {
-                    Some(file_path)
+                if file_path.is_file() {
+                    let extension = file_path.extension().and_then(|s| s.to_str());
+                    // Only include .txt, .md, .html for now
+                    match extension {
+                        Some("txt") | Some("md") | Some("html") => Some(file_path),
+                        _ => None, // Ignore other file types for now
+                    }
                 } else {
                     None
                 }
@@ -529,12 +538,34 @@ impl InvertedIndex {
             .map(|file_path| {
                 println!("Indexing document ID (temp): {:?}", file_path);
                 let doc_id = temp_next_doc_id.fetch_add(1, Ordering::SeqCst);
-                let content = fs::read_to_string(&file_path)?;
                 let title = file_path
                     .file_stem()
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string();
+
+                // NEW: Content extraction based on file type
+                let content = match file_path.extension().and_then(|ext| ext.to_str()) {
+                    Some("txt") | Some("md") => fs::read_to_string(&file_path)?,
+                    Some("html") => {
+                        let html_content = fs::read_to_string(&file_path)?;
+                        let document = Html::parse_document(&html_content);
+                        // Select a common body or main content area, then extract text
+                        let selector = Selector::parse("body").unwrap(); // Assuming "body" contains main content
+                        document
+                            .select(&selector)
+                            .next()
+                            .map(|element| element.text().collect::<String>())
+                            .unwrap_or_else(|| "".to_string()) // If no body or text, return empty string
+                    }
+                    _ => {
+                        // This case should ideally not be reached due to the filter_map above
+                        return Err(io::Error::new(
+                            io::ErrorKind::Unsupported,
+                            "Unsupported file type",
+                        ));
+                    }
+                };
 
                 let doc = Document {
                     id: doc_id,
