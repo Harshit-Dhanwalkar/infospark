@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use colored::*;
 use regex;
+use strsim;
 
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +21,9 @@ use rayon::prelude::*;
 
 use lru::LruCache;
 use std::sync::{Arc, Mutex};
+
+// --- CONSTANTS ---
+const FUZZY_THRESHOLD: usize = 2; // Maximum Levenshtein distance for fuzzy matching
 
 // --- TYPE ALIASES ---
 type TermPostings = Vec<(u32, Vec<usize>)>;
@@ -143,11 +147,9 @@ impl InvertedIndex {
         }
 
         let results = if query.starts_with('"') && query.ends_with('"') && query.len() > 1 {
-            // hrase query
-            let phrase_content = &query[1..query.len() - 1]; // Remove quotes
+            let phrase_content = &query[1..query.len() - 1];
             self.perform_phrase_search_and_rank(phrase_content, query)
         } else {
-            // regular keyword query
             let query_tokens_with_pos = crate::tokenizer::tokenize(query);
             let query_tokens: Vec<String> = query_tokens_with_pos
                 .iter()
@@ -164,16 +166,31 @@ impl InvertedIndex {
         results
     }
 
-    // Helper function for keyword search
+    // NEW: Helper function to find fuzzy matches for a token
+    fn find_fuzzy_matches(&self, query_token: &str) -> Vec<(String, usize)> {
+        let mut fuzzy_matches = Vec::new();
+        for (indexed_term, _) in &self.index {
+            let distance = strsim::levenshtein(query_token, indexed_term);
+            if distance <= FUZZY_THRESHOLD {
+                fuzzy_matches.push((indexed_term.clone(), distance));
+            }
+        }
+        // Sort by distance so closest matches are considered first
+        fuzzy_matches.sort_by_key(|(_, distance)| *distance);
+        fuzzy_matches
+    }
+
     fn perform_keyword_search_and_rank(
         &self,
         query_tokens: &[String],
         original_query: &str,
     ) -> Vec<SearchResult> {
         let mut candidate_docs: HashMap<u32, HashMap<String, Vec<usize>>> = HashMap::new();
+        let mut fuzzy_matched_terms: HashMap<String, String> = HashMap::new();
 
         for token in query_tokens {
             if let Some(doc_entries) = self.index.get(token) {
+                // Exact match
                 for (doc_id, positions) in doc_entries {
                     candidate_docs
                         .entry(*doc_id)
@@ -181,7 +198,34 @@ impl InvertedIndex {
                         .insert(token.clone(), positions.clone());
                 }
             } else {
-                return Vec::new(); // If any query token is not found, no result
+                // No exact match, try fuzzy matching
+                let matches = self.find_fuzzy_matches(token);
+                if let Some((closest_match, distance)) = matches.into_iter().next() {
+                    // Take the closest one
+                    if let Some(doc_entries) = self.index.get(&closest_match) {
+                        for (doc_id, positions) in doc_entries {
+                            candidate_docs
+                                .entry(*doc_id)
+                                .or_insert_with(HashMap::new)
+                                .insert(closest_match.clone(), positions.clone());
+                        }
+                        fuzzy_matched_terms.insert(token.clone(), closest_match.clone());
+                        println!(
+                            "Note: Fuzzy matched '{}' to '{}' (distance: {})",
+                            token.yellow(),
+                            closest_match.yellow(),
+                            distance
+                        );
+                    } else {
+                        return Vec::new();
+                    }
+                } else {
+                    println!(
+                        "No matches (exact or fuzzy) found for term: {}",
+                        token.red()
+                    );
+                    return Vec::new();
+                }
             }
         }
 
@@ -189,7 +233,10 @@ impl InvertedIndex {
         for (doc_id, term_map) in candidate_docs {
             let mut all_terms_present = true;
             for q_token in query_tokens {
-                if !term_map.contains_key(q_token) {
+                if !term_map.contains_key(q_token)
+                    && !term_map
+                        .contains_key(fuzzy_matched_terms.get(q_token).unwrap_or(&String::new()))
+                {
                     all_terms_present = false;
                     break;
                 }
@@ -204,13 +251,17 @@ impl InvertedIndex {
         for (doc_id, term_frequencies_and_pos) in intersection_results {
             let mut score = 0.0;
             for q_token in query_tokens {
-                let tf = term_frequencies_and_pos.get(q_token).map_or(0, |v| v.len()) as f64;
+                let actual_term = fuzzy_matched_terms.get(q_token).unwrap_or(q_token);
+
+                let tf = term_frequencies_and_pos
+                    .get(actual_term)
+                    .map_or(0, |v| v.len()) as f64;
 
                 if tf == 0.0 {
                     continue;
                 }
 
-                let num_docs_with_term = self.index.get(q_token).map_or(0, |v| v.len()) as f64;
+                let num_docs_with_term = self.index.get(actual_term).map_or(0, |v| v.len()) as f64;
 
                 let idf = if num_docs_with_term > 0.0 {
                     (self.total_docs as f64 / num_docs_with_term).log10()
@@ -218,7 +269,14 @@ impl InvertedIndex {
                     0.0
                 };
 
-                score += tf * idf;
+                let mut term_score = tf * idf;
+
+                // Penalize fuzzy matches
+                if fuzzy_matched_terms.contains_key(q_token) {
+                    term_score *= 0.5;
+                }
+
+                score += term_score;
             }
             ranked_results.push((score, doc_id));
         }
@@ -238,8 +296,10 @@ impl InvertedIndex {
                     let content_lower = doc.content.to_lowercase();
 
                     let mut first_match_idx = None;
-                    for q_token_stemmed in query_tokens {
-                        if let Some(idx) = content_lower.find(q_token_stemmed) {
+                    for q_token in query_tokens {
+                        let actual_term_for_snippet =
+                            fuzzy_matched_terms.get(q_token).unwrap_or(q_token);
+                        if let Some(idx) = content_lower.find(actual_term_for_snippet) {
                             first_match_idx = Some(idx);
                             break;
                         }
@@ -293,7 +353,6 @@ impl InvertedIndex {
             .collect()
     }
 
-    // Helper function for phrase search
     fn perform_phrase_search_and_rank(
         &self,
         phrase_query_text: &str,
@@ -367,7 +426,7 @@ impl InvertedIndex {
                     }
 
                     if is_phrase_match {
-                        *phrase_matching_docs.entry(doc_id).or_insert(0.0) += 1.0; // Increment score for each phrase match
+                        *phrase_matching_docs.entry(doc_id).or_insert(0.0) += 1.0;
                     }
                 }
             }
@@ -418,7 +477,6 @@ impl InvertedIndex {
                         let snippet_text = &doc.content[byte_start..byte_end];
                         let mut highlighted_snippet = snippet_text.to_string();
 
-                        // Highlight original terms in the snippet
                         for original_term in &original_phrase_terms {
                             let re_str = format!(r"(?i)\b{}\b", regex::escape(original_term));
                             let re = regex::Regex::new(&re_str).unwrap();
