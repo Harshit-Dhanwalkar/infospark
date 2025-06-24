@@ -61,7 +61,7 @@ fn main() -> Result<()> {
 
     loop {
         let readline =
-            rl.readline("Enter search query (or 'graph' to visualize, 'exit' to quit): ");
+            rl.readline("Enter search query (or 'graph' to open web app, 'exit' to quit): ");
 
         match readline {
             Ok(line) => {
@@ -77,16 +77,16 @@ fn main() -> Result<()> {
                 if query.eq_ignore_ascii_case("exit") {
                     break;
                 } else if query.eq_ignore_ascii_case("graph") {
-                    println!("Generating network graph data...");
+                    println!("Generating interactive web app data...");
                     match index.generate_network_graph_data() {
                         Ok(json_data) => {
                             let escaped_json_data = json_data
-                                .replace("\\", "\\\\")
-                                .replace("\"", "\\\"")
-                                .replace("\n", "\\n")
-                                .replace("\r", "\\r")
-                                .replace("\t", "\\t")
-                                .replace("`", "\\`");
+                                .replace("\\", "\\\\") // Escape backslashes
+                                .replace("\"", "\\\"") // Escape double quotes
+                                .replace("\n", "\\n") // Escape newlines
+                                .replace("\r", "\\r") // Escape carriage returns
+                                .replace("\t", "\\t") // Escape tabs
+                                .replace("`", "\\`"); // Escape backticks for JS template literal
 
                             let html_content = format!(
                                 r#"<!DOCTYPE html>
@@ -94,7 +94,7 @@ fn main() -> Result<()> {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Infospark Network Graph</title>
+    <title>Infospark Interactive Graph & Search</title>
     <script type="text/javascript" src="https://unpkg.com/vis-network@9.1.2/dist/vis-network.min.js"></script>
     <link href="https://unpkg.com/vis-network@9.1.2/dist/vis-network.min.css" rel="stylesheet" type="text/css" />
     <style type="text/css">
@@ -103,15 +103,145 @@ fn main() -> Result<()> {
             font-family: 'Inter', sans-serif;
             margin: 0;
             padding: 0;
-            overflow: hidden; 
+            display: flex; /* Use flexbox for layout */
+            height: 100vh; /* Full viewport height */
+            overflow: hidden;
             background-color: #f0f2f5;
         }}
+        #sidebar {{
+            width: 300px; /* Fixed width sidebar */
+            background-color: #fff;
+            box-shadow: 2px 0 5px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+            padding: 15px;
+            overflow-y: auto; /* Scroll for content */
+            z-index: 101; /* Above graph */
+        }}
+        #main-content {{
+            flex-grow: 1; /* Graph takes remaining space */
+            position: relative;
+        }}
         #mynetwork {{
-            width: 100vw;
-            height: 100vh;
+            width: 100%;
+            height: 100%;
             border: 1px solid lightgray;
             background-color: #f9f9f9;
         }}
+        #search-container {{
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #eee;
+        }}
+        #search-input {{
+            width: calc(100% - 20px);
+            padding: 10px;
+            margin-bottom: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 1em;
+        }}
+        .search-button {{
+            padding: 8px 12px;
+            background-color: #007bff; /* Blue */
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.9em;
+            margin-right: 5px;
+            transition: background-color 0.2s ease;
+        }}
+        .search-button:hover {{
+            background-color: #0056b3;
+        }}
+        #reset-search-button {{
+            background-color: #6c757d; /* Gray */
+        }}
+        #reset-search-button:hover {{
+            background-color: #5a6268;
+        }}
+        #search-results {{
+            flex-grow: 1;
+            overflow-y: auto;
+            border-top: 1px solid #eee;
+            padding-top: 15px;
+        }}
+        .search-result-item {{
+            background-color: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 5px;
+            padding: 10px;
+            margin-bottom: 10px;
+            cursor: pointer;
+            transition: background-color 0.2s ease;
+        }}
+        .search-result-item:hover {{
+            background-color: #e2e6ea;
+        }}
+        .search-result-item h4 {{
+            margin-top: 0;
+            margin-bottom: 5px;
+            color: #333;
+        }}
+        .search-result-item p {{
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 5px;
+        }}
+        .search-result-item .tags {{
+            font-size: 0.8em;
+            color: #00796b;
+        }}
+        .search-result-item .tags span {{
+            background-color: #e0f7fa;
+            padding: 2px 6px;
+            border-radius: 3px;
+            margin-right: 3px;
+            display: inline-block;
+            margin-bottom: 3px;
+        }}
+
+        #graph-filter-controls {{
+            position: absolute; /* Relative to main-content */
+            top: 10px;
+            right: 10px;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 10px 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            z-index: 100;
+        }}
+        #graph-filter-input {{
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            font-size: 0.9em;
+            width: 180px;
+        }}
+        .graph-filter-button {{
+            padding: 8px 12px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.9em;
+            transition: background-color 0.2s ease;
+        }}
+        .graph-filter-button:hover {{
+            background-color: #45a049;
+        }}
+        #reset-graph-filter-button {{
+            background-color: #008CBA;
+        }}
+        #reset-graph-filter-button:hover {{
+            background-color: #007bb5;
+        }}
+
         .vis-tooltip {{
             background-color: #333;
             color: white;
@@ -202,55 +332,30 @@ fn main() -> Result<()> {
             display: inline-block;
             margin-bottom: 5px;
         }}
-        #filter-controls {{
-            position: absolute;
-            top: 10px;
-            left: 10px;
-            background: rgba(255, 255, 255, 0.9);
-            padding: 10px 15px;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            display: flex;
-            gap: 10px;
-            align-items: center;
-            z-index: 100;
-        }}
-        #filter-input {{
-            padding: 8px;
-            border: 1px solid #ccc;
-            border-radius: 5px;
-            font-size: 0.9em;
-            width: 180px;
-        }}
-        .filter-button {{
-            padding: 8px 12px;
-            background-color: #4CAF50; /* Green */
-            color: white;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-            font-size: 0.9em;
-            transition: background-color 0.2s ease;
-        }}
-        .filter-button:hover {{
-            background-color: #45a049;
-        }}
-        #reset-filter-button {{
-            background-color: #008CBA; /* Blue */
-        }}
-        #reset-filter-button:hover {{
-            background-color: #007bb5;
-        }}
     </style>
 </head>
 <body>
-    <div id="mynetwork"></div>
-
-    <div id="filter-controls">
-        <input type="text" id="filter-input" placeholder="Filter by tag or keyword...">
-        <button id="filter-tag-button" class="filter-button">Filter by Tag</button>
-        <button id="filter-keyword-button" class="filter-button">Filter by Keyword</button>
-        <button id="reset-filter-button" class="filter-button">Reset Filter</button>
+    <div id="sidebar">
+        <div id="search-container">
+            <h3>Document Search</h3>
+            <input type="text" id="search-input-text" placeholder="Search documents...">
+            <button id="perform-search-button" class="search-button">Search</button>
+            <button id="clear-search-button" class="search-button">Clear Results</button>
+        </div>
+        <div id="search-results">
+            <!-- Search results will be displayed here -->
+            <p style="color: #777;">Type a query and click 'Search' or hit Enter.</p>
+        </div>
+    </div>
+    <div id="main-content">
+        <div id="mynetwork"></div>
+        <!-- Graph filter controls are now part of this content area -->
+        <div id="graph-filter-controls">
+            <input type="text" id="graph-filter-input" placeholder="Filter graph by tag or keyword...">
+            <button id="graph-filter-tag-button" class="graph-filter-button">Filter by Tag</button>
+            <button id="graph-filter-keyword-button" class="graph-filter-button">Filter by Keyword</button>
+            <button id="reset-graph-filter-button" class="graph-filter-button">Reset Graph</button>
+        </div>
     </div>
 
     <!-- Document Preview Modal -->
@@ -270,25 +375,27 @@ fn main() -> Result<()> {
     <script type="text/javascript">
         console.log("Vis object after script load:", typeof vis !== 'undefined' ? vis : "vis not defined yet.");
 
-        const graphDataJson = `{}`; 
+        const fullAppDataJson = `{}`; 
 
-        let originalNodes = new vis.DataSet([]); // Store original full set of nodes
-        let originalEdges = new vis.DataSet([]); // Store original full set of edges
-        let network; // Declare network variable globally
+        let originalNodes = new vis.DataSet([]); 
+        let originalEdges = new vis.DataSet([]); 
+        let searchableDocuments = {{}}; // All JS object literals must be {{}}
+        let network;
 
         try {{
-            const parsedData = JSON.parse(graphDataJson);
-            console.log("Parsed Graph Data from Rust:", parsedData);
+            const parsedData = JSON.parse(fullAppDataJson);
+            console.log("Parsed Full App Data from Rust:", parsedData);
             originalNodes = new vis.DataSet(parsedData.nodes);
             originalEdges = new vis.DataSet(parsedData.edges);
+            searchableDocuments = parsedData.searchable_documents; // Load searchable documents
         }} catch (e) {{
-            console.error("Error parsing graph data:", e);
-            console.error("Graph data was likely malformed. Please check backend generation or content of graphDataJson."); 
-            document.getElementById('mynetwork').innerHTML = '<div style="text-align: center; padding-top: 50px; color: #777;">Error loading graph. Check browser console for details.</div>';
+            console.error("Error parsing full app data:", e);
+            console.error("Data was likely malformed. Please check backend generation or content of fullAppDataJson."); 
+            document.body.innerHTML = '<div style="text-align: center; padding-top: 50px; color: #777;">Error loading application data. Check browser console for details.</div>';
         }}
 
         const container = document.getElementById('mynetwork');
-        const data = {{ nodes: originalNodes, edges: originalEdges }};
+        const data = {{ nodes: originalNodes, edges: originalEdges }}; // All JS object literals must be {{}}
         const options = {{
             nodes: {{
                 shape: 'dot',
@@ -340,24 +447,23 @@ fn main() -> Result<()> {
             }}
         }};
 
-        // Initialize network only if data is available
+        // Initialize network only if nodes are properly initialized
         if (originalNodes.length > 0) {{
             network = new vis.Network(container, data, options);
 
             network.on("doubleClick", function (params) {{
                 if (params.nodes.length > 0) {{
                     const nodeId = params.nodes[0];
-                    const node = originalNodes.get(nodeId);
-                    
+                    const node = originalNodes.get(nodeId); 
+
                     const modal = document.getElementById('documentModal');
                     const modalTitle = document.getElementById('modalTitle');
                     const modalContent = document.getElementById('modalContent');
                     const modalTags = document.getElementById('modalTags');
-                    
+
                     modalTitle.textContent = node.label; 
                     modalContent.textContent = node.content_preview; 
-                    
-                    // Use node.js_tags directly for formatting
+
                     modalTags.innerHTML = ''; 
                     if (node.js_tags && node.js_tags.length > 0) {{
                         node.js_tags.forEach(tag => {{
@@ -375,12 +481,10 @@ fn main() -> Result<()> {
             document.getElementById('mynetwork').innerHTML = '<div style="text-align: center; padding-top: 50px; color: #777;">No graph data to display. Please ensure your corpus has documents and/or tags.</div>';
         }}
 
-        // Event listener for modal close button
         document.getElementById('modalCloseButton').addEventListener('click', function() {{
             document.getElementById('documentModal').classList.remove('visible');
         }});
 
-        // Event listener for clicking outside modal to close it
         document.getElementById('documentModal').addEventListener('click', function(event) {{
             if (event.target === this) {{ 
                 this.classList.remove('visible');
@@ -388,78 +492,227 @@ fn main() -> Result<()> {
         }});
 
 
-        const filterInput = document.getElementById('filter-input');
-        const filterTagButton = document.getElementById('filter-tag-button');
-        const filterKeywordButton = document.getElementById('filter-keyword-button');
-        const resetFilterButton = document.getElementById('reset-filter-button');
+        // ----- Client-Side Search Logic -----
+        const searchInputText = document.getElementById('search-input-text');
+        const performSearchButton = document.getElementById('perform-search-button');
+        const clearSearchButton = document.getElementById('clear-search-button');
+        const searchResultsDiv = document.getElementById('search-results');
 
-        function applyFilter(filterType) {{
-            const query = filterInput.value.toLowerCase().trim();
+        // Simple tokenizer for client-side search (JS version)
+        function tokenize(text) {{
+            return text.toLowerCase().match(/\b\w+\b/g) || [];
+        }}
 
-            if (!query && filterType !== 'reset') {{
-                resetFilter();
+        function displaySearchResults(results) {{
+            searchResultsDiv.innerHTML = ''; // Clear previous results
+            if (results.length === 0) {{
+                searchResultsDiv.innerHTML = '<p style="color: #777;">No documents found matching your search.</p>';
                 return;
             }}
 
-            let filteredNodesData = [];
-            let filteredEdgesData = [];
-            let visibleNodeIds = new Set();
-
-            if (filterType === 'reset') {{
-                filteredNodesData = originalNodes.get();
-                filteredEdgesData = originalEdges.get();
-            }} else {{
-                originalNodes.forEach(node => {{
-                    let isMatch = false;
-                    if (filterType === 'tag') {{
-                        if (node.js_tags && node.js_tags.some(tag => tag.includes(query))) {{
-                            isMatch = true;
+            results.forEach(doc => {{
+                const item = document.createElement('div');
+                item.className = 'search-result-item';
+                item.onclick = () => {{
+                    // Highlight node on graph when clicking search result
+                    network.selectNodes([doc.id]);
+                    network.focus(doc.id, {{scale: 1.5, animation: {{duration: 500, easingFunction: "easeOutCubic"}} }}); // All JS object literals must be {{}}
+                    // Show modal preview
+                    const node = originalNodes.get(doc.id);
+                    if (node) {{
+                        document.getElementById('modalTitle').textContent = node.label; 
+                        document.getElementById('modalContent').textContent = node.content_preview; 
+                        const modalTags = document.getElementById('modalTags');
+                        modalTags.innerHTML = ''; 
+                        if (node.js_tags && node.js_tags.length > 0) {{
+                            node.js_tags.forEach(tag => {{
+                                const tagSpan = document.createElement('span');
+                                tagSpan.textContent = `#${{tag}}`; // Template literal expression, not object
+                                modalTags.appendChild(tagSpan);
+                            }});
                         }}
-                    }} else if (filterType === 'keyword') {{
-                        if (node.label.toLowerCase().includes(query) || node.content_preview.toLowerCase().includes(query)) {{
-                            isMatch = true;
-                        }}
+                        document.getElementById('documentModal').classList.add('visible');
                     }}
+                }};
 
-                    if (isMatch) {{
-                        filteredNodesData.push(node);
-                        visibleNodeIds.add(node.id);
-                    }}
-                }});
+                const titleElem = document.createElement('h4');
+                titleElem.textContent = doc.title;
+                item.appendChild(titleElem);
 
-                // Only include edges between currently visible nodes
-                originalEdges.forEach(edge => {{
-                    if (visibleNodeIds.has(edge.from) && visibleNodeIds.has(edge.to)) {{
-                        filteredEdgesData.push(edge);
-                    }}
-                }});
-            }}
+                const previewElem = document.createElement('p');
+                previewElem.textContent = doc.content_preview;
+                item.appendChild(previewElem);
 
-            // Update the network's data sets
-            // Important: Recreate DataSets to ensure vis.js detects changes properly
-            network.setData({{
-                nodes: new vis.DataSet(filteredNodesData),
-                edges: new vis.DataSet(filteredEdgesData)
+                if (doc.tags && doc.tags.length > 0) {{
+                    const tagsElem = document.createElement('div');
+                    tagsElem.className = 'tags';
+                    doc.tags.forEach(tag => {{
+                        const tagSpan = document.createElement('span');
+                        tagSpan.textContent = `#${{tag}}`; // Template literal expression, not object
+                        tagsElem.appendChild(tagSpan);
+                    }});
+                    item.appendChild(tagsElem);
+                }}
+                searchResultsDiv.appendChild(item);
             }});
         }}
 
-        function resetFilter() {{
-            filterInput.value = '';
-            applyFilter('reset');
+        function performClientSideSearch() {{
+            const query = searchInputText.value.toLowerCase().trim();
+            const results = [];
+            const queryTokens = tokenize(query);
+
+            if (query === "") {{
+                displaySearchResults([]); // Clear results if query is empty
+                filterGraphByNodeIds([]); // Reset graph filter
+                return;
+            }}
+
+            let filteredNodeIds = new Set(); // For filtering graph
+
+            for (const docId in searchableDocuments) {{
+                const doc = searchableDocuments[docId];
+                let isMatch = false;
+
+                // Tag Search (starts with #)
+                if (query.startsWith('#')) {{
+                    const tagQuery = query.substring(1);
+                    if (doc.tags && doc.tags.some(tag => tag.includes(tagQuery))) {{
+                        isMatch = true;
+                    }}
+                }} 
+                // Keyword/General Search
+                else {{
+                    const docContentTokens = tokenize(doc.content);
+                    const docTitleTokens = tokenize(doc.title);
+
+                    for (const qToken of queryTokens) {{
+                        // Basic keyword match in content or title
+                        if (docContentTokens.includes(qToken) || docTitleTokens.includes(qToken)) {{
+                            isMatch = true;
+                            break;
+                        }}
+                        // Simple wildcard match (ends with *)
+                        if (qToken.endsWith('*') && qToken.length > 1) {{
+                            const prefix = qToken.slice(0, -1);
+                            if (docContentTokens.some(dToken => dToken.startsWith(prefix)) || 
+                                docTitleTokens.some(dToken => dToken.startsWith(prefix))) {{
+                                isMatch = true;
+                                break;
+                            }}
+                        }}
+                        // Fuzzy search (very basic, just check if query is substring)
+                        if (doc.content.toLowerCase().includes(query) || doc.title.toLowerCase().includes(query)) {{
+                            isMatch = true;
+                            break;
+                        }}
+                    }}
+                }}
+
+                if (isMatch) {{
+                    results.push(doc);
+                    filteredNodeIds.add(doc.id);
+                }}
+            }}
+            displaySearchResults(results);
+            filterGraphByNodeIds(Array.from(filteredNodeIds));
         }}
 
-        filterTagButton.addEventListener('click', () => applyFilter('tag'));
-        filterKeywordButton.addEventListener('click', () => applyFilter('keyword'));
-        resetFilterButton.addEventListener('click', resetFilter);
+        function clearClientSideSearch() {{
+            searchInputText.value = '';
+            displaySearchResults([]); // Clear text results
+            filterGraphByNodeIds([]); // Reset graph filter
+        }}
 
-        // Allow pressing Enter in the input field to trigger keyword filter
-        filterInput.addEventListener('keypress', (e) => {{
+        performSearchButton.addEventListener('click', performClientSideSearch);
+        clearSearchButton.addEventListener('click', clearClientSideSearch);
+        searchInputText.addEventListener('keypress', (e) => {{
             if (e.key === 'Enter') {{
-                applyFilter('keyword');
+                performClientSideSearch();
             }}
         }});
 
+        // ----- Graph Filtering Controls -----
+        const graphFilterInput = document.getElementById('graph-filter-input');
+        const graphFilterTagButton = document.getElementById('graph-filter-tag-button');
+        const graphFilterKeywordButton = document.getElementById('graph-filter-keyword-button');
+        const resetGraphFilterButton = document.getElementById('reset-graph-filter-button');
 
+        function filterGraphByNodeIds(nodeIdsToShow) {{
+            if (network) {{ // Ensure network is initialized
+                if (nodeIdsToShow.length === 0) {{
+                    // If no IDs to show, display all original nodes/edges
+                    network.setData({{
+                        nodes: originalNodes,
+                        edges: originalEdges
+                    }});
+                }} else {{
+                    // Filter nodes: only include those in nodeIdsToShow
+                    const filteredNodes = originalNodes.get({{
+                        filter: function (node) {{
+                            return nodeIdsToShow.includes(node.id);
+                        }}
+                    }});
+
+                    // Filter edges: only include edges where BOTH connected nodes are visible
+                    const visibleNodeIdsSet = new Set(nodeIdsToShow);
+                    const filteredEdges = originalEdges.get({{
+                        filter: function (edge) {{
+                            return visibleNodeIdsSet.has(edge.from) && visibleNodeIdsSet.has(edge.to);
+                        }}
+                    }});
+
+                    network.setData({{
+                        nodes: new vis.DataSet(filteredNodes),
+                        edges: new vis.DataSet(filteredEdges)
+                    }});
+                }}
+                network.fit(); // Zoom to fit filtered nodes
+            }}
+        }}
+
+        // Combined graph filter logic
+        function applyGraphFilter(filterType) {{
+            const query = graphFilterInput.value.toLowerCase().trim();
+            let nodesMatchingFilter = new Set();
+
+            if (!query) {{ // If query is empty, reset filter
+                filterGraphByNodeIds([]);
+                return;
+            }}
+
+            originalNodes.forEach(node => {{
+                let isMatch = false;
+                if (filterType === 'tag') {{
+                    if (node.js_tags && node.js_tags.some(tag => tag.includes(query))) {{
+                        isMatch = true;
+                    }}
+                }} else if (filterType === 'keyword') {{
+                    if (node.label.toLowerCase().includes(query) || node.content_preview.toLowerCase().includes(query)) {{
+                        isMatch = true;
+                    }}
+                }}
+                if (isMatch) {{
+                    nodesMatchingFilter.add(node.id);
+                }}
+            }});
+            filterGraphByNodeIds(Array.from(nodesMatchingFilter));
+        }}
+
+        function resetGraphFilter() {{
+            graphFilterInput.value = '';
+            filterGraphByNodeIds([]);
+        }}
+
+        graphFilterTagButton.addEventListener('click', () => applyGraphFilter('tag'));
+        graphFilterKeywordButton.addEventListener('click', () => applyGraphFilter('keyword'));
+        resetGraphFilterButton.addEventListener('click', resetGraphFilter);
+        
+        graphFilterInput.addEventListener('keypress', (e) => {{
+            if (e.key === 'Enter') {{
+                applyGraphFilter('keyword');
+            }}
+        }});
     </script>
 </body>
 </html>"#,
@@ -469,12 +722,12 @@ fn main() -> Result<()> {
                             fs::write(GRAPH_HTML_FILE, html_content)
                                 .context("Failed to write graph HTML file")?;
                             println!(
-                                "Network graph saved to '{}'. Open this file in your web browser.",
+                                "Interactive web app saved to '{}'. Open this file in your web browser.",
                                 GRAPH_HTML_FILE.blue()
                             );
                         }
                         Err(e) => {
-                            eprintln!("Error generating graph data: {:?}", e);
+                            eprintln!("Error generating web app data: {:?}", e);
                         }
                     }
                 } else {

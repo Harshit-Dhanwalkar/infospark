@@ -56,6 +56,7 @@ pub struct SearchResult {
     pub tags: Vec<String>,
 }
 
+// Structs for graph data serialization
 #[derive(Serialize, Debug)]
 pub struct GraphNode {
     pub id: u32,
@@ -63,7 +64,7 @@ pub struct GraphNode {
     pub title: String,
     pub group: String,
     pub content_preview: String,
-    pub js_tags: Vec<String>,
+    pub js_tags: Vec<String>, // Direct tags for JavaScript filtering
 }
 
 #[derive(Serialize, Debug)]
@@ -74,9 +75,20 @@ pub struct GraphEdge {
 }
 
 #[derive(Serialize, Debug)]
-pub struct GraphData {
+pub struct ClientSearchableDocument {
+    pub id: u32,
+    pub title: String,
+    pub content: String, // Full content for client-side search
+    pub tags: Vec<String>,
+    pub content_preview: String, // Keep preview for quick display
+}
+
+// Master data structure for the full web application
+#[derive(Serialize, Debug)]
+pub struct FullWebAppData {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
+    pub searchable_documents: HashMap<u32, ClientSearchableDocument>,
 }
 
 // Helper function for default LruCache initialization
@@ -822,6 +834,7 @@ impl InvertedIndex {
     pub fn generate_network_graph_data(&self) -> Result<String> {
         let mut nodes: Vec<GraphNode> = Vec::new();
         let mut edges: Vec<GraphEdge> = Vec::new();
+        let mut searchable_documents: HashMap<u32, ClientSearchableDocument> = HashMap::new();
         let mut processed_edges: std::collections::HashSet<(u32, u32)> =
             std::collections::HashSet::new();
 
@@ -842,13 +855,20 @@ impl InvertedIndex {
                 label: doc.title.clone(),
                 title: format!("{} (Tags: {})", doc.title, doc.tags.join(", ")),
                 group: file_extension,
-                content_preview,
+                content_preview: content_preview.clone(), // Clone for graph node
                 js_tags: doc.tags.clone(),
             });
 
-            println!(
-                "Document ID: {}, Title: {:?}, Tags: {:?}",
-                doc.id, doc.title, doc.tags
+            // Populate searchable_documents map
+            searchable_documents.insert(
+                doc.id,
+                ClientSearchableDocument {
+                    id: doc.id,
+                    title: doc.title.clone(),
+                    content: doc.content.clone(),
+                    tags: doc.tags.clone(),
+                    content_preview,
+                },
             );
 
             for other_doc in self.documents.values() {
@@ -864,11 +884,6 @@ impl InvertedIndex {
                 }
 
                 if shared_tags_count > 0 {
-                    println!(
-                        "  --> Found {} shared tags between {} (ID: {}) and {} (ID: {})",
-                        shared_tags_count, doc.title, doc.id, other_doc.title, other_doc.id
-                    );
-
                     let (node1, node2) = if doc.id < other_doc.id {
                         (doc.id, other_doc.id)
                     } else {
@@ -886,12 +901,13 @@ impl InvertedIndex {
             }
         }
 
-        println!("Total graph nodes generated: {}", nodes.len());
-        println!("Total graph edges generated: {}", edges.len());
-
-        let graph_data = GraphData { nodes, edges };
-        let json_string = serde_json::to_string_pretty(&graph_data)
-            .context("Failed to serialize graph data to JSON")?;
+        let full_app_data = FullWebAppData {
+            nodes,
+            edges,
+            searchable_documents,
+        };
+        let json_string = serde_json::to_string_pretty(&full_app_data)
+            .context("Failed to serialize full app data to JSON")?;
 
         Ok(json_string)
     }
