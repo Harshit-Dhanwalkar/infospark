@@ -9,7 +9,7 @@ use std::path::Path;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use colored::*;
 
 const INDEX_FILE: &str = "search_index.bin";
@@ -81,12 +81,12 @@ fn main() -> Result<()> {
                     match index.generate_network_graph_data() {
                         Ok(json_data) => {
                             let escaped_json_data = json_data
-                                .replace("\\", "\\\\") // Escape backslashes
-                                .replace("\"", "\\\"") // Escape double quotes
-                                .replace("\n", "\\n") // Escape newlines
-                                .replace("\r", "\\r") // Escape carriage returns
-                                .replace("\t", "\\t") // Escape tabs
-                                .replace("`", "\\`"); // Escape backticks for JS template literal
+                                .replace("\\", "\\\\")
+                                .replace("\"", "\\\"")
+                                .replace("\n", "\\n")
+                                .replace("\r", "\\r")
+                                .replace("\t", "\\t")
+                                .replace("`", "\\`");
 
                             let html_content = format!(
                                 r#"<!DOCTYPE html>
@@ -103,24 +103,37 @@ fn main() -> Result<()> {
             font-family: 'Inter', sans-serif;
             margin: 0;
             padding: 0;
-            display: flex; /* Use flexbox for layout */
-            height: 100vh; /* Full viewport height */
-            overflow: hidden;
+            overflow: hidden; /* Prevent scrollbars */
             background-color: #f0f2f5;
         }}
+        #app-container {{ /* Main app container */
+            display: flex; 
+            height: 100vh;
+            width: 100vw;
+        }}
         #sidebar {{
-            width: 300px; /* Fixed width sidebar */
+            width: 300px;
             background-color: #fff;
             box-shadow: 2px 0 5px rgba(0,0,0,0.1);
             display: flex;
             flex-direction: column;
             padding: 15px;
-            overflow-y: auto; /* Scroll for content */
-            z-index: 101; /* Above graph */
+            overflow-y: auto; 
+            z-index: 101; 
+            transition: width 0.3s ease-in-out, padding 0.3s ease-in-out;
+            flex-shrink: 0;
+        }}
+        #sidebar.collapsed {{
+            width: 0;
+            padding: 0;
+            overflow: hidden;
         }}
         #main-content {{
-            flex-grow: 1; /* Graph takes remaining space */
+            flex-grow: 1; 
             position: relative;
+            transition: margin-left 0.3s ease-in-out;
+        }}
+        #main-content.expanded-margin {{
         }}
         #mynetwork {{
             width: 100%;
@@ -333,29 +346,54 @@ fn main() -> Result<()> {
             display: inline-block;
             margin-bottom: 5px;
         }}
+        #sidebar-toggle {{
+            position: absolute;
+            top: 15px;
+            left: 310px;
+            z-index: 102;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 1.2em;
+            transition: left 0.3s ease-in-out, background-color 0.2s ease;
+        }}
+        #sidebar-toggle.collapsed-position {{
+            left: 10px;
+        }}
+        #sidebar-toggle:hover {{
+            background-color: #0056b3;
+        }}
     </style>
 </head>
 <body>
-    <div id="sidebar">
-        <div id="search-container">
-            <h3>Document Search</h3>
-            <input type="text" id="search-input-text" placeholder="Search documents...">
-            <button id="perform-search-button" class="search-button">Search</button>
-            <button id="clear-search-button" class="search-button">Clear Results</button>
+    <div id="app-container">
+        <div id="sidebar">
+            <div id="search-container">
+                <h3>Document Search</h3>
+                <input type="text" id="search-input-text" placeholder="Search documents...">
+                <button id="perform-search-button" class="search-button">Search</button>
+                <button id="clear-search-button" class="search-button">Clear Results</button>
+            </div>
+            <div id="search-results">
+                <p style="color: #777;">Type a query and click 'Search' or hit Enter.</p>
+            </div>
         </div>
-        <div id="search-results">
-            <p style="color: #777;">Type a query and click 'Search' or hit Enter.</p>
+        <div id="main-content">
+            <div id="mynetwork"></div>
+            <div id="graph-filter-controls">
+                <input type="text" id="graph-filter-input" placeholder="Filter graph by tag or keyword...">
+                <button id="graph-filter-tag-button" class="graph-filter-button">Filter by Tag</button>
+                <button id="graph-filter-keyword-button" class="graph-filter-button">Filter by Keyword</button>
+                <button id="reset-graph-filter-button" class="graph-filter-button">Reset Graph</button>
+            </div>
         </div>
     </div>
-    <div id="main-content">
-        <div id="mynetwork"></div>
-        <div id="graph-filter-controls">
-            <input type="text" id="graph-filter-input" placeholder="Filter graph by tag or keyword...">
-            <button id="graph-filter-tag-button" class="graph-filter-button">Filter by Tag</button>
-            <button id="graph-filter-keyword-button" class="graph-filter-button">Filter by Keyword</button>
-            <button id="reset-graph-filter-button" class="graph-filter-button">Reset Graph</button>
-        </div>
-    </div>
+
+    <!-- Sidebar Toggle Button -->
+    <button id="sidebar-toggle">&lt;</button> 
 
     <!-- Document Preview Modal -->
     <div id="documentModal" class="modal-overlay">
@@ -453,7 +491,7 @@ fn main() -> Result<()> {
             network.on("doubleClick", function (params) {{
                 if (params.nodes.length > 0) {{
                     const nodeId = params.nodes[0];
-                    const node = originalNodes.get(nodeId); 
+                    const node = originalNodes.get(nodeId);
 
                     const modal = document.getElementById('documentModal');
                     const modalTitle = document.getElementById('modalTitle');
@@ -467,7 +505,7 @@ fn main() -> Result<()> {
                     if (node.js_tags && node.js_tags.length > 0) {{
                         node.js_tags.forEach(tag => {{
                             const tagSpan = document.createElement('span');
-                            tagSpan.textContent = `#${{tag}}`; 
+                            tagSpan.textContent = `#${{tag}}`;
                             modalTags.appendChild(tagSpan);
                         }});
                     }}
@@ -513,10 +551,8 @@ fn main() -> Result<()> {
                 const item = document.createElement('div');
                 item.className = 'search-result-item';
                 item.onclick = () => {{
-                    // Highlight node on graph when clicking search result
                     network.selectNodes([doc.id]);
                     network.focus(doc.id, {{scale: 1.5, animation: {{duration: 500, easingFunction: "easeOutCubic"}} }});
-                    // Show modal preview
                     const node = originalNodes.get(doc.id);
                     if (node) {{
                         document.getElementById('modalTitle').textContent = node.label; 
@@ -614,7 +650,7 @@ fn main() -> Result<()> {
                 }}
             }}
             displaySearchResults(results);
-            filterGraphByNodeIds(Array.from(filteredNodeIds));
+            filterGraphByNodeIds(Array.from(filteredNodeIds)); 
         }}
 
         function clearClientSideSearch() {{
@@ -712,6 +748,28 @@ fn main() -> Result<()> {
                 applyGraphFilter('keyword');
             }}
         }});
+
+        // Sidebar Toggle Logic
+        const sidebar = document.getElementById('sidebar');
+        const mainContent = document.getElementById('main-content');
+        const sidebarToggle = document.getElementById('sidebar-toggle');
+
+        sidebarToggle.addEventListener('click', () => {{
+            sidebar.classList.toggle('collapsed');
+            sidebarToggle.classList.toggle('collapsed-position');
+            // Update button text/icon
+            if (sidebar.classList.contains('collapsed')) {{
+                sidebarToggle.textContent = '>';
+            }} else {{
+                sidebarToggle.textContent = '<';
+            }}
+            // Force Vis.js to redraw and adjust layout
+            if (network) {{
+                network.redraw();
+                network.fit(); 
+            }}
+        }});
+
     </script>
 </body>
 </html>"#,
