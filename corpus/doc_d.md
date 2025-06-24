@@ -1,3 +1,5 @@
+tags: #research
+
 # My Research Notes on AI and Robotics
 
 ## Introduction

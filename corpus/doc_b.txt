@@ -1,1 +1,3 @@
 Programming in Rust can be challenging but rewarding. The Rust community provides excellent learning resources.
+
+Here's a tag for #rust

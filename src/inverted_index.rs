@@ -41,6 +41,7 @@ pub struct Document {
     pub path: PathBuf,
     pub content: String, // Storing processed plain text content
     pub title: String,
+    pub tags: Vec<String>, // Field to store extracted tags
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +49,7 @@ pub struct SearchResult {
     pub doc: Document,
     pub score: f64,
     pub snippet: String,
+    pub tags: Vec<String>,
 }
 
 // Helper function for default LruCache initialization
@@ -60,6 +62,7 @@ fn default_search_cache() -> Arc<Mutex<LruCache<String, Vec<SearchResult>>>> {
 pub struct InvertedIndex {
     index: HashMap<String, TermPostings>,
     documents: HashMap<u32, Document>,
+    tags: HashMap<String, Vec<u32>>,
     #[serde(skip)]
     next_doc_id: AtomicU32,
     total_docs: usize,
@@ -75,6 +78,7 @@ impl InvertedIndex {
         InvertedIndex {
             index: HashMap::new(),
             documents: HashMap::new(),
+            tags: HashMap::new(),
             next_doc_id: AtomicU32::new(1),
             total_docs: 0,
             search_cache: Arc::new(Mutex::new(LruCache::new(non_zero_capacity))),
@@ -111,8 +115,10 @@ impl InvertedIndex {
             path: doc.path,
             content: doc.content,
             title: doc.title,
+            tags: doc.tags.clone(),
         };
 
+        // Index document content
         let tokens_with_positions = crate::tokenizer::tokenize(&current_doc.content);
         let mut doc_token_positions: HashMap<String, Vec<usize>> = HashMap::new();
         for (token, pos) in tokens_with_positions {
@@ -127,6 +133,13 @@ impl InvertedIndex {
                 .entry(token)
                 .or_insert_with(Vec::new)
                 .push((doc_id, positions));
+        }
+
+        for tag in &current_doc.tags {
+            self.tags
+                .entry(tag.clone())
+                .or_insert_with(Vec::new)
+                .push(doc_id);
         }
 
         self.documents.insert(doc_id, current_doc);
@@ -151,7 +164,33 @@ impl InvertedIndex {
             }
         }
 
-        let results = if query.starts_with('"') && query.ends_with('"') && query.len() > 1 {
+        let results = if query.starts_with('#') {
+            let tag_name = query[1..].trim().to_lowercase();
+            if tag_name.is_empty() {
+                return Vec::new();
+            }
+
+            let mut tag_results: Vec<SearchResult> = Vec::new();
+            if let Some(doc_ids) = self.tags.get(&tag_name) {
+                for &doc_id in doc_ids {
+                    if let Some(doc) = self.documents.get(&doc_id) {
+                        let snippet = "...".to_string();
+                        tag_results.push(SearchResult {
+                            doc: doc.clone(),
+                            score: 1.0,
+                            snippet: snippet,
+                            tags: doc.tags.clone(),
+                        });
+                    }
+                }
+            }
+            tag_results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            tag_results
+        } else if query.starts_with('"') && query.ends_with('"') && query.len() > 1 {
             let phrase_content = &query[1..query.len() - 1];
             self.perform_phrase_search_and_rank(phrase_content, query)
         } else {
@@ -176,10 +215,6 @@ impl InvertedIndex {
                         }
                     }
                     if !found_wildcard_matches {
-                        println!(
-                            "Note: No terms found for wildcard query '{}'",
-                            raw_word.yellow()
-                        );
                         if query.split_whitespace().count() == 1 && processed_query_terms.is_empty()
                         {
                             return Vec::new();
@@ -263,10 +298,6 @@ impl InvertedIndex {
                         } else {
                         }
                     } else {
-                        println!(
-                            "No matches (exact or fuzzy) found for term: {}",
-                            token.red()
-                        );
                         if processed_query_terms.len() == 1 {
                             return Vec::new();
                         }
@@ -424,9 +455,10 @@ impl InvertedIndex {
                     };
 
                     SearchResult {
-                        doc,
+                        doc: doc.clone(),
                         score,
                         snippet,
+                        tags: doc.tags.clone(),
                     }
                 })
             })
@@ -567,9 +599,10 @@ impl InvertedIndex {
                     };
 
                     SearchResult {
-                        doc,
+                        doc: doc.clone(),
                         score,
                         snippet,
+                        tags: doc.tags.clone(),
                     }
                 })
             })
@@ -587,7 +620,10 @@ impl InvertedIndex {
             return Err(anyhow!("Provided path is not a directory"));
         }
 
-        let file_paths: Vec<PathBuf> = fs::read_dir(path)?
+        // Tag regex for extraction
+        let tag_regex = regex::Regex::new(r"#(\w+)").unwrap();
+
+        let file_paths = fs::read_dir(path)?
             .filter_map(|entry| {
                 let entry = entry.ok()?;
                 let file_path = entry.path();
@@ -604,14 +640,13 @@ impl InvertedIndex {
                     None
                 }
             })
-            .collect();
+            .collect::<Vec<PathBuf>>();
 
         let temp_next_doc_id = AtomicU32::new(self.next_doc_id.load(Ordering::SeqCst));
 
-        let results: Vec<ProcessedDocumentResult> = file_paths
+        let results = file_paths
             .iter()
             .map(|file_path| {
-                println!("Indexing document ID (temp): {:?}", file_path);
                 let doc_id = temp_next_doc_id.fetch_add(1, Ordering::SeqCst);
                 let title = file_path
                     .file_stem()
@@ -641,11 +676,20 @@ impl InvertedIndex {
                     ))?,
                 };
 
+                // Extract tags from content
+                let mut extracted_tags = Vec::new();
+                for cap in tag_regex.captures_iter(&content) {
+                    if let Some(tag_match) = cap.get(1) {
+                        extracted_tags.push(tag_match.as_str().to_lowercase());
+                    }
+                }
+
                 let doc = Document {
                     id: doc_id,
                     path: file_path.clone(),
                     content: content,
                     title: title,
+                    tags: extracted_tags, // Assign extracted tags to the document
                 };
 
                 let tokens_with_positions = crate::tokenizer::tokenize(&doc.content);
@@ -658,15 +702,14 @@ impl InvertedIndex {
                 }
                 Ok((doc, partial_index_entries))
             })
-            .collect();
+            .collect::<Vec<ProcessedDocumentResult>>();
 
         let mut new_docs_count = 0;
         for result in results {
             let (doc, partial_index_entries) = result?;
             let doc_id = doc.id;
 
-            self.documents.insert(doc_id, doc);
-            new_docs_count += 1;
+            self.documents.insert(doc_id, doc.clone());
 
             for (token, positions) in partial_index_entries {
                 self.index
@@ -674,6 +717,15 @@ impl InvertedIndex {
                     .or_insert_with(Vec::new)
                     .push((doc_id, positions));
             }
+
+            for tag in &doc.tags {
+                self.tags
+                    .entry(tag.clone())
+                    .or_insert_with(Vec::new)
+                    .push(doc_id);
+            }
+
+            new_docs_count += 1;
         }
 
         self.total_docs += new_docs_count;

@@ -86,8 +86,13 @@ fn main() -> Result<()> {
                             "  - Doc ID: {}, Title: {:?}, Score: {:.4}",
                             result.doc.id, result.doc.title, result.score
                         );
-                        println!("    Snippet: {}", result.snippet);
-                        println!("    Path: {:?}\n", result.doc.path);
+                        if !result.tags.is_empty() {
+                            let formatted_tags: Vec<String> =
+                                result.tags.iter().map(|tag| format!("#{}", tag)).collect();
+                            println!("     - Tags: {}", formatted_tags.join(", "));
+                        }
+                        println!("     - Path: {:?}", result.doc.path);
+                        println!("     - Snippet: {}\n", result.snippet);
                     }
                 }
                 println!("");
