@@ -9,7 +9,7 @@ use std::path::Path;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use colored::*;
 
 const INDEX_FILE: &str = "search_index.bin";
@@ -143,7 +143,7 @@ fn main() -> Result<()> {
         }}
         .search-button {{
             padding: 8px 12px;
-            background-color: #007bff; /* Blue */
+            background-color: #007bff;
             color: white;
             border: none;
             border-radius: 5px;
@@ -156,7 +156,7 @@ fn main() -> Result<()> {
             background-color: #0056b3;
         }}
         #reset-search-button {{
-            background-color: #6c757d; /* Gray */
+            background-color: #6c757d;
         }}
         #reset-search-button:hover {{
             background-color: #5a6268;
@@ -202,8 +202,9 @@ fn main() -> Result<()> {
             margin-bottom: 3px;
         }}
 
+        /* Graph filter controls */
         #graph-filter-controls {{
-            position: absolute; /* Relative to main-content */
+            position: absolute;
             top: 10px;
             right: 10px;
             background: rgba(255, 255, 255, 0.9);
@@ -296,7 +297,7 @@ fn main() -> Result<()> {
             font-size: 1.5em;
         }}
         .modal-close-button {{
-            background: #f44336; 
+            background: #f44336;
             color: white;
             border: none;
             border-radius: 50%;
@@ -316,7 +317,7 @@ fn main() -> Result<()> {
             font-size: 0.95em;
             line-height: 1.6;
             color: #555;
-            white-space: pre-wrap; 
+            white-space: pre-wrap;
         }}
         .modal-tags {{
             margin-top: 10px;
@@ -343,13 +344,11 @@ fn main() -> Result<()> {
             <button id="clear-search-button" class="search-button">Clear Results</button>
         </div>
         <div id="search-results">
-            <!-- Search results will be displayed here -->
             <p style="color: #777;">Type a query and click 'Search' or hit Enter.</p>
         </div>
     </div>
     <div id="main-content">
         <div id="mynetwork"></div>
-        <!-- Graph filter controls are now part of this content area -->
         <div id="graph-filter-controls">
             <input type="text" id="graph-filter-input" placeholder="Filter graph by tag or keyword...">
             <button id="graph-filter-tag-button" class="graph-filter-button">Filter by Tag</button>
@@ -375,11 +374,11 @@ fn main() -> Result<()> {
     <script type="text/javascript">
         console.log("Vis object after script load:", typeof vis !== 'undefined' ? vis : "vis not defined yet.");
 
-        const fullAppDataJson = `{}`; 
+        const fullAppDataJson = `{}`;
 
-        let originalNodes = new vis.DataSet([]); 
-        let originalEdges = new vis.DataSet([]); 
-        let searchableDocuments = {{}}; // All JS object literals must be {{}}
+        let originalNodes = new vis.DataSet([]);
+        let originalEdges = new vis.DataSet([]);
+        let searchableDocuments = {{}};
         let network;
 
         try {{
@@ -387,7 +386,7 @@ fn main() -> Result<()> {
             console.log("Parsed Full App Data from Rust:", parsedData);
             originalNodes = new vis.DataSet(parsedData.nodes);
             originalEdges = new vis.DataSet(parsedData.edges);
-            searchableDocuments = parsedData.searchable_documents; // Load searchable documents
+            searchableDocuments = parsedData.searchable_documents;
         }} catch (e) {{
             console.error("Error parsing full app data:", e);
             console.error("Data was likely malformed. Please check backend generation or content of fullAppDataJson."); 
@@ -395,7 +394,7 @@ fn main() -> Result<()> {
         }}
 
         const container = document.getElementById('mynetwork');
-        const data = {{ nodes: originalNodes, edges: originalEdges }}; // All JS object literals must be {{}}
+        const data = {{ nodes: originalNodes, edges: originalEdges }};
         const options = {{
             nodes: {{
                 shape: 'dot',
@@ -419,10 +418,10 @@ fn main() -> Result<()> {
                 }}
             }},
             groups: {{
-                txt: {{ color: {{ background: '#ADD8E6', border: '#4682B4' }} }}, 
-                md: {{ color: {{ background: '#90EE90', border: '#3CB371' }} }},  
-                html: {{ color: {{ background: '#FFDAB9', border: '#FF8C00' }} }}, 
-                pdf: {{ color: {{ background: '#FFB6C1', border: '#DC143C' }} }},  
+                txt: {{ color: {{ background: '#ADD8E6', border: '#4682B4' }} }},
+                md: {{ color: {{ background: '#90EE90', border: '#3CB371' }} }},
+                html: {{ color: {{ background: '#FFDAB9', border: '#FF8C00' }} }},
+                pdf: {{ color: {{ background: '#FFB6C1', border: '#DC143C' }} }},
                 unknown: {{ color: {{ background: '#D3D3D3', border: '#696969' }} }}
             }},
             physics: {{
@@ -433,16 +432,16 @@ fn main() -> Result<()> {
                     springLength: 95,
                     springConstant: 0.04,
                     damping: 0.09,
-                    avoidOverlap: 0 
+                    avoidOverlap: 0
                 }},
                 solver: 'barnesHut',
                 stabilization: {{
-                    iterations: 2500 
+                    iterations: 2500
                 }}
             }},
             interaction: {{
                 hover: true,
-                navigationButtons: true, 
+                navigationButtons: true,
                 keyboard: true
             }}
         }};
@@ -462,18 +461,18 @@ fn main() -> Result<()> {
                     const modalTags = document.getElementById('modalTags');
 
                     modalTitle.textContent = node.label; 
-                    modalContent.textContent = node.content_preview; 
+                    modalContent.textContent = node.content_preview;
 
                     modalTags.innerHTML = ''; 
                     if (node.js_tags && node.js_tags.length > 0) {{
                         node.js_tags.forEach(tag => {{
                             const tagSpan = document.createElement('span');
-                            tagSpan.textContent = `#${{tag}}`;
+                            tagSpan.textContent = `#${{tag}}`; 
                             modalTags.appendChild(tagSpan);
                         }});
                     }}
 
-                    modal.classList.add('visible'); 
+                    modal.classList.add('visible');
                 }}
             }});
         }} else {{
@@ -504,7 +503,7 @@ fn main() -> Result<()> {
         }}
 
         function displaySearchResults(results) {{
-            searchResultsDiv.innerHTML = ''; // Clear previous results
+            searchResultsDiv.innerHTML = '';
             if (results.length === 0) {{
                 searchResultsDiv.innerHTML = '<p style="color: #777;">No documents found matching your search.</p>';
                 return;
@@ -516,7 +515,7 @@ fn main() -> Result<()> {
                 item.onclick = () => {{
                     // Highlight node on graph when clicking search result
                     network.selectNodes([doc.id]);
-                    network.focus(doc.id, {{scale: 1.5, animation: {{duration: 500, easingFunction: "easeOutCubic"}} }}); // All JS object literals must be {{}}
+                    network.focus(doc.id, {{scale: 1.5, animation: {{duration: 500, easingFunction: "easeOutCubic"}} }});
                     // Show modal preview
                     const node = originalNodes.get(doc.id);
                     if (node) {{
@@ -527,7 +526,7 @@ fn main() -> Result<()> {
                         if (node.js_tags && node.js_tags.length > 0) {{
                             node.js_tags.forEach(tag => {{
                                 const tagSpan = document.createElement('span');
-                                tagSpan.textContent = `#${{tag}}`; // Template literal expression, not object
+                                tagSpan.textContent = `#${{tag}}`;
                                 modalTags.appendChild(tagSpan);
                             }});
                         }}
@@ -548,7 +547,7 @@ fn main() -> Result<()> {
                     tagsElem.className = 'tags';
                     doc.tags.forEach(tag => {{
                         const tagSpan = document.createElement('span');
-                        tagSpan.textContent = `#${{tag}}`; // Template literal expression, not object
+                        tagSpan.textContent = `#${{tag}}`;
                         tagsElem.appendChild(tagSpan);
                     }});
                     item.appendChild(tagsElem);
@@ -563,12 +562,12 @@ fn main() -> Result<()> {
             const queryTokens = tokenize(query);
 
             if (query === "") {{
-                displaySearchResults([]); // Clear results if query is empty
-                filterGraphByNodeIds([]); // Reset graph filter
+                displaySearchResults([]);
+                filterGraphByNodeIds([]);
                 return;
             }}
 
-            let filteredNodeIds = new Set(); // For filtering graph
+            let filteredNodeIds = new Set();
 
             for (const docId in searchableDocuments) {{
                 const doc = searchableDocuments[docId];
@@ -620,8 +619,8 @@ fn main() -> Result<()> {
 
         function clearClientSideSearch() {{
             searchInputText.value = '';
-            displaySearchResults([]); // Clear text results
-            filterGraphByNodeIds([]); // Reset graph filter
+            displaySearchResults([]);
+            filterGraphByNodeIds([]);
         }}
 
         performSearchButton.addEventListener('click', performClientSideSearch);
@@ -639,7 +638,7 @@ fn main() -> Result<()> {
         const resetGraphFilterButton = document.getElementById('reset-graph-filter-button');
 
         function filterGraphByNodeIds(nodeIdsToShow) {{
-            if (network) {{ // Ensure network is initialized
+            if (network) {{
                 if (nodeIdsToShow.length === 0) {{
                     // If no IDs to show, display all original nodes/edges
                     network.setData({{
@@ -667,7 +666,7 @@ fn main() -> Result<()> {
                         edges: new vis.DataSet(filteredEdges)
                     }});
                 }}
-                network.fit(); // Zoom to fit filtered nodes
+                network.fit();
             }}
         }}
 
@@ -676,7 +675,7 @@ fn main() -> Result<()> {
             const query = graphFilterInput.value.toLowerCase().trim();
             let nodesMatchingFilter = new Set();
 
-            if (!query) {{ // If query is empty, reset filter
+            if (!query) {{
                 filterGraphByNodeIds([]);
                 return;
             }}
@@ -707,7 +706,7 @@ fn main() -> Result<()> {
         graphFilterTagButton.addEventListener('click', () => applyGraphFilter('tag'));
         graphFilterKeywordButton.addEventListener('click', () => applyGraphFilter('keyword'));
         resetGraphFilterButton.addEventListener('click', resetGraphFilter);
-        
+
         graphFilterInput.addEventListener('keypress', (e) => {{
             if (e.key === 'Enter') {{
                 applyGraphFilter('keyword');
@@ -721,10 +720,17 @@ fn main() -> Result<()> {
 
                             fs::write(GRAPH_HTML_FILE, html_content)
                                 .context("Failed to write graph HTML file")?;
-                            println!(
-                                "Interactive web app saved to '{}'. Open this file in your web browser.",
-                                GRAPH_HTML_FILE.blue()
-                            );
+
+                            match open::that(GRAPH_HTML_FILE) {
+                                Ok(_) => println!(
+                                    "Automatically opened '{}' in your default web browser.",
+                                    GRAPH_HTML_FILE.blue()
+                                ),
+                                Err(e) => eprintln!(
+                                    "Failed to automatically open '{}': {:?}",
+                                    GRAPH_HTML_FILE, e
+                                ),
+                            }
                         }
                         Err(e) => {
                             eprintln!("Error generating web app data: {:?}", e);
