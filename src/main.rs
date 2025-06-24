@@ -10,6 +10,7 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
 use anyhow::{Context, Result};
+use colored::*;
 
 const INDEX_FILE: &str = "search_index.bin";
 const HISTORY_FILE: &str = ".infospark_history";
@@ -87,8 +88,11 @@ fn main() -> Result<()> {
                             result.doc.id, result.doc.title, result.score
                         );
                         if !result.tags.is_empty() {
-                            let formatted_tags: Vec<String> =
-                                result.tags.iter().map(|tag| format!("#{}", tag)).collect();
+                            let formatted_tags: Vec<String> = result
+                                .tags
+                                .iter()
+                                .map(|tag| format!("#{}", tag).blue().to_string())
+                                .collect();
                             println!("    - Tags: {}", formatted_tags.join(", "));
                         }
                         println!("    - Path: {:?}", result.doc.path);

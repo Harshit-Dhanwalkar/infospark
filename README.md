@@ -8,9 +8,11 @@ Infospark currently includes the following functionalities:
 
 - **Fast In-memory Indexing:** Efficiently processes and stores document data in an inverted index structure.
 - **Persistence:** Automatically saves the generated index to `search_index.bin` and loads it on subsequent runs, avoiding redundant indexing.
-- **Tokenization & Normalization:** Processes text by tokenizing, lowercasing, filtering stop words, and applying stemming to ensure robust search matches.
-- **Keyword Search:** Supports basic keyword queries with relevance ranking using a TF-IDF based scoring mechanism.
-- **Positional Indexing (Phase 1 of Phrase Search):** The groundwork for phrase search is laid by storing word positions within documents, allowing for accurate phrase matching in future updates.
+- **Tokenization & Normalization:** Tokenization & Normalization: Processes text by tokenizing, lowercasing, filtering stop words, and applying stemming to ensure robust search matches.
+- **Keyword Search (BM25 Ranked):** Supports basic keyword queries with advanced relevance ranking using the `Okapi BM25 algorithm`, providing more accurate and nuanced results.
+- **Full Phrase Search:** Accurately matches exact phrases in queries enclosed in double quotes (e.g., "rust programming").
+- **Fuzzy Matching / Typo Tolerance:** Provides approximate matching for misspelled single-word queries, offering suggestions and results for terms close to your input (e.g., 'rst' for 'rust').
+- **Wildcard / Prefix Search:** Supports wildcard queries using an asterisk (`*`) at the end of a word (e.g., `rust*` matches "rust", "rusty", "rusting"; `program*` matches "programming", etc.).
 - **Highlighted Snippets:** Provides contextual snippets in search results with query terms highlighted for easy readability.
 - **Parallel Document Indexing:** Utilizes Rust's concurrency features (via `rayon`) to speed up the initial document loading and indexing process.
 - **Search Result Caching (LRU):** Employs a Least Recently Used (LRU) cache to store and quickly retrieve results for frequent queries.
@@ -59,7 +61,15 @@ Infospark currently includes the following functionalities:
     - **Subsequent Runs:** The program will quickly load the existing `search_index.bin` file, saving the re-indexing time.
 
 4.  **Interact:**
-    After indexing/loading, you will be prompted to enter search queries. Type your query and press Enter. You can use exact phrases ("`multi word query`"), wildcard terms (`pro*`), or allow fuzzy matching for single-word typos. Type `exit` to quit the application.
+    After indexing/loading, you will be prompted to enter search queries. Type your query and press Enter. You can use:
+
+        - Keywords: `rust` `language`
+        - Exact Phrases: `"modern programming"`
+        - Wildcard Terms: `program*`
+        - Fuzzy Terms: `rst` (for `rust`)
+        - Tags: `#rust`
+
+    Type `exit` to quit the application.
 
 ## Contributing
 
