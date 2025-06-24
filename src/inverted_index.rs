@@ -12,6 +12,7 @@ use regex;
 use strsim;
 
 use serde::{Deserialize, Serialize};
+use serde_json;
 
 use bincode;
 use bincode::serde as bincode_serde;
@@ -40,11 +41,11 @@ type ProcessedDocumentResult = Result<(Document, DocumentPartialIndex)>;
 pub struct Document {
     pub id: u32,
     pub path: PathBuf,
-    pub content: String, // Storing processed plain text content
+    pub content: String,
     pub title: String,
-    pub tags: Vec<String>,  // Field to store extracted tags
-    pub num_tokens: usize,  // Number of tokens in the document
-    pub modified_time: u64, // Last modification timestamp
+    pub tags: Vec<String>,
+    pub num_tokens: usize,
+    pub modified_time: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +54,29 @@ pub struct SearchResult {
     pub score: f64,
     pub snippet: String,
     pub tags: Vec<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct GraphNode {
+    pub id: u32,
+    pub label: String,
+    pub title: String,
+    pub group: String,
+    pub content_preview: String,
+    pub js_tags: Vec<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct GraphEdge {
+    pub from: u32,
+    pub to: u32,
+    pub width: f64,
+}
+
+#[derive(Serialize, Debug)]
+pub struct GraphData {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
 }
 
 // Helper function for default LruCache initialization
@@ -382,13 +406,11 @@ impl InvertedIndex {
 
                 let num_docs_with_term = self.index.get(actual_term).map_or(0, |v| v.len()) as f64;
 
-                // BM25 IDF calculation
                 let idf = ((self.total_docs as f64 - num_docs_with_term + 0.5)
                     / (num_docs_with_term + 0.5)
                     + 1.0)
                     .log10();
 
-                // BM25 Term Frequency component calculation
                 let term_freq_comp = (tf * (BM25_K1 + 1.0))
                     / (tf
                         + BM25_K1
@@ -795,5 +817,82 @@ impl InvertedIndex {
 
     pub fn total_documents(&self) -> usize {
         self.total_docs
+    }
+
+    pub fn generate_network_graph_data(&self) -> Result<String> {
+        let mut nodes: Vec<GraphNode> = Vec::new();
+        let mut edges: Vec<GraphEdge> = Vec::new();
+        let mut processed_edges: std::collections::HashSet<(u32, u32)> =
+            std::collections::HashSet::new();
+
+        for doc in self.documents.values() {
+            let mut content_preview = doc.content.chars().take(300).collect::<String>();
+            if doc.content.len() > 300 {
+                content_preview.push_str("...");
+            }
+
+            let file_extension = doc
+                .path
+                .extension()
+                .and_then(|os_str| os_str.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            nodes.push(GraphNode {
+                id: doc.id,
+                label: doc.title.clone(),
+                title: format!("{} (Tags: {})", doc.title, doc.tags.join(", ")),
+                group: file_extension,
+                content_preview,
+                js_tags: doc.tags.clone(),
+            });
+
+            println!(
+                "Document ID: {}, Title: {:?}, Tags: {:?}",
+                doc.id, doc.title, doc.tags
+            );
+
+            for other_doc in self.documents.values() {
+                if doc.id == other_doc.id {
+                    continue;
+                }
+
+                let mut shared_tags_count = 0;
+                for tag in &doc.tags {
+                    if other_doc.tags.contains(tag) {
+                        shared_tags_count += 1;
+                    }
+                }
+
+                if shared_tags_count > 0 {
+                    println!(
+                        "  --> Found {} shared tags between {} (ID: {}) and {} (ID: {})",
+                        shared_tags_count, doc.title, doc.id, other_doc.title, other_doc.id
+                    );
+
+                    let (node1, node2) = if doc.id < other_doc.id {
+                        (doc.id, other_doc.id)
+                    } else {
+                        (other_doc.id, doc.id)
+                    };
+
+                    if processed_edges.insert((node1, node2)) {
+                        edges.push(GraphEdge {
+                            from: node1,
+                            to: node2,
+                            width: shared_tags_count as f64,
+                        });
+                    }
+                }
+            }
+        }
+
+        println!("Total graph nodes generated: {}", nodes.len());
+        println!("Total graph edges generated: {}", edges.len());
+
+        let graph_data = GraphData { nodes, edges };
+        let json_string = serde_json::to_string_pretty(&graph_data)
+            .context("Failed to serialize graph data to JSON")?;
+
+        Ok(json_string)
     }
 }

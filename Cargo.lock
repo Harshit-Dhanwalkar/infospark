@@ -480,6 +480,7 @@ dependencies = [
  "rustyline",
  "scraper",
  "serde",
+ "serde_json",
  "stop-words",
  "strsim",
 ]
