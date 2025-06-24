@@ -8,6 +8,7 @@ Infospark currently includes the following functionalities:
 
 - **Fast In-memory Indexing:** Efficiently processes and stores document data in an inverted index structure.
 - **Persistence:** Automatically saves the generated index to `search_index.bin` and loads it on subsequent runs, avoiding redundant indexing.
+- **Incremental Indexing:** Intelligently detects and processes only new, modified, or deleted documents in the `corpus/` directory, significantly speeding up startup times for existing document collections.
 - **Tokenization & Normalization:** Tokenization & Normalization: Processes text by tokenizing, lowercasing, filtering stop words, and applying stemming to ensure robust search matches.
 - **Keyword Search (BM25 Ranked):** Supports basic keyword queries with advanced relevance ranking using the `Okapi BM25 algorithm`, providing more accurate and nuanced results.
 - **Full Phrase Search:** Accurately matches exact phrases in queries enclosed in double quotes (e.g., "rust programming").
