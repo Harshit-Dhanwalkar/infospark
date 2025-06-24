@@ -13,8 +13,8 @@ Infospark currently includes the following functionalities:
 - **Full Phrase Search:** Accurately matches exact phrases in queries enclosed in double quotes (e.g., "rust programming").
 - **Fuzzy Matching / Typo Tolerance:** Provides approximate matching for misspelled single-word queries, offering suggestions and results for terms close to your input (e.g., 'rst' for 'rust').
 - **Wildcard / Prefix Search:** Supports wildcard queries using an asterisk (`*`) at the end of a word (e.g., `rust*` matches "rust", "rusty", "rusting"; `program*` matches "programming", etc.).
+- **Tag-Based Search:** Allows precise searching for documents explicitly marked with specific tags using the `#` prefix (e.g., `#rust`, `#research`). Tags are displayed in blue for easy identification in results.
 - **Highlighted Snippets:** Provides contextual snippets in search results with query terms highlighted for easy readability.
-- **Parallel Document Indexing:** Utilizes Rust's concurrency features (via `rayon`) to speed up the initial document loading and indexing process.
 - **Search Result Caching (LRU):** Employs a Least Recently Used (LRU) cache to store and quickly retrieve results for frequent queries.
 - **Multi-format Document Support**: Indexes and searches across plain text (`.txt`), Markdown (`.md`), HTML (`.html`), and PDF (`.pdf`) documents.
 

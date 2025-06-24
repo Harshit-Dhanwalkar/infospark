@@ -5,6 +5,7 @@ use std::fs;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::UNIX_EPOCH;
 
 use colored::*;
 use regex;
@@ -41,8 +42,9 @@ pub struct Document {
     pub path: PathBuf,
     pub content: String, // Storing processed plain text content
     pub title: String,
-    pub tags: Vec<String>, // Field to store extracted tags
-    pub num_tokens: usize, // Number of tokens in the document
+    pub tags: Vec<String>,  // Field to store extracted tags
+    pub num_tokens: usize,  // Number of tokens in the document
+    pub modified_time: u64, // Last modification timestamp
 }
 
 #[derive(Debug, Clone)]
@@ -112,7 +114,8 @@ impl InvertedIndex {
 
     #[allow(dead_code)]
     pub fn add_document(&mut self, doc: Document) {
-        let doc_id = self.next_doc_id.fetch_add(1, Ordering::SeqCst);
+        let doc_id = doc.id;
+
         let current_doc = Document {
             id: doc_id,
             path: doc.path,
@@ -120,9 +123,9 @@ impl InvertedIndex {
             title: doc.title,
             tags: doc.tags.clone(),
             num_tokens: doc.num_tokens,
+            modified_time: doc.modified_time,
         };
 
-        // Index document content
         let tokens_with_positions = crate::tokenizer::tokenize(&current_doc.content);
         let mut doc_token_positions: HashMap<String, Vec<usize>> = HashMap::new();
         for (token, pos) in tokens_with_positions {
@@ -139,7 +142,6 @@ impl InvertedIndex {
                 .push((doc_id, positions));
         }
 
-        // Index document tags
         for tag in &current_doc.tags {
             self.tags
                 .entry(tag.clone())
@@ -148,8 +150,31 @@ impl InvertedIndex {
         }
 
         self.documents.insert(doc_id, current_doc);
-        self.total_docs += 1;
         self.clear_cache();
+    }
+
+    fn remove_document(&mut self, doc_id: u32) {
+        if let Some(doc_to_remove) = self.documents.remove(&doc_id) {
+            let tokens = crate::tokenizer::tokenize(&doc_to_remove.content);
+            for (token, _) in tokens {
+                if let Some(postings) = self.index.get_mut(&token) {
+                    postings.retain(|&(id, _)| id != doc_id);
+                    if postings.is_empty() {
+                        self.index.remove(&token);
+                    }
+                }
+            }
+
+            for tag in &doc_to_remove.tags {
+                if let Some(doc_ids) = self.tags.get_mut(tag) {
+                    doc_ids.retain(|&id| id != doc_id);
+                    if doc_ids.is_empty() {
+                        self.tags.remove(tag);
+                    }
+                }
+            }
+            self.clear_cache();
+        }
     }
 
     fn clear_cache(&self) {
@@ -170,7 +195,6 @@ impl InvertedIndex {
         }
 
         let results = if query.starts_with('#') {
-            // Handle tag search
             let tag_name = query[1..].trim().to_lowercase();
             if tag_name.is_empty() {
                 return Vec::new();
@@ -202,7 +226,6 @@ impl InvertedIndex {
         } else {
             let mut processed_query_terms: Vec<(String, bool)> = Vec::new();
 
-            // Split the query by whitespace to preserve '*' for initial check
             for raw_word in query.to_lowercase().split_whitespace() {
                 let clean_word =
                     raw_word.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '*');
@@ -251,7 +274,6 @@ impl InvertedIndex {
         results
     }
 
-    // Helper function to find fuzzy matches for a token
     fn find_fuzzy_matches(&self, query_token: &str) -> Vec<(String, usize)> {
         let mut fuzzy_matches = Vec::new();
         for (indexed_term, _) in &self.index {
@@ -374,7 +396,6 @@ impl InvertedIndex {
 
                 let mut term_score = idf * term_freq_comp;
 
-                // Penalize fuzzy matches
                 if !is_wildcard_origin && fuzzy_matched_terms.contains_key(q_token_original) {
                     term_score *= 0.5;
                 }
@@ -582,7 +603,6 @@ impl InvertedIndex {
                         let mut highlighted_snippet = snippet_text.to_string();
 
                         for term_to_highlight in &terms_to_highlight_phrase {
-                            // Use stemmed tokens for highlighting
                             let re_str = format!(r"(?i)\b{}\b", regex::escape(term_to_highlight));
                             let re = regex::Regex::new(&re_str).unwrap();
 
@@ -621,117 +641,150 @@ impl InvertedIndex {
 
         let tag_regex = regex::Regex::new(r"#(\w+)").unwrap();
 
-        let file_paths = fs::read_dir(path)?
-            .filter_map(|entry| {
-                let entry = entry.ok()?;
-                let file_path = entry.path();
-                if file_path.is_file() {
-                    let extension = file_path.extension().and_then(|s| s.to_str());
-                    match extension {
-                        Some("txt") | Some("md") | Some("html") | Some("pdf") => Some(file_path),
-                        _ => None,
+        let mut files_in_corpus: HashMap<PathBuf, u64> = HashMap::new();
+        let mut document_paths_in_index: HashMap<PathBuf, u32> = HashMap::new();
+
+        for (doc_id, doc) in &self.documents {
+            document_paths_in_index.insert(doc.path.clone(), *doc_id);
+        }
+
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let file_path = entry.path();
+            if file_path.is_file() {
+                let extension = file_path.extension().and_then(|s| s.to_str());
+                match extension {
+                    Some("txt") | Some("md") | Some("html") | Some("pdf") => {
+                        let metadata = fs::metadata(&file_path)?;
+                        let modified_time_secs =
+                            metadata.modified()?.duration_since(UNIX_EPOCH)?.as_secs();
+                        files_in_corpus.insert(file_path, modified_time_secs);
                     }
-                } else {
-                    None
+                    _ => {
+                        println!("Skipping unsupported file type: {:?}", file_path);
+                    }
                 }
-            })
-            .collect::<Vec<PathBuf>>();
+            }
+        }
 
-        let temp_next_doc_id = AtomicU32::new(self.next_doc_id.load(Ordering::SeqCst));
-        let mut total_tokens_for_avg_calc: usize = 0;
+        let mut docs_to_add_or_update_details: Vec<Document> = Vec::new();
+        let mut doc_ids_to_remove: Vec<u32> = Vec::new();
 
-        let results = file_paths
-            .iter()
-            .map(|file_path| {
-                let doc_id = temp_next_doc_id.fetch_add(1, Ordering::SeqCst);
-                let title = file_path
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
+        let mut current_doc_ids_in_corpus = HashMap::new();
+        for (indexed_path, indexed_doc_id) in &document_paths_in_index {
+            if !files_in_corpus.contains_key(indexed_path) {
+                doc_ids_to_remove.push(*indexed_doc_id);
+            } else {
+                current_doc_ids_in_corpus.insert(indexed_path.clone(), *indexed_doc_id);
+            }
+        }
 
-                let content = match file_path.extension().and_then(|ext| ext.to_str()) {
-                    Some("txt") | Some("md") => fs::read_to_string(&file_path)
+        for (file_path_owned, current_modified_time) in files_in_corpus {
+            if let Some(existing_doc_id) = current_doc_ids_in_corpus.get(&file_path_owned) {
+                if let Some(existing_doc) = self.documents.get(existing_doc_id) {
+                    if existing_doc.modified_time != current_modified_time {
+                        println!("Updating modified document: {:?}", file_path_owned);
+                        doc_ids_to_remove.push(*existing_doc_id);
+
+                        let content = match file_path_owned.extension().and_then(|ext| ext.to_str())
+                        {
+                            Some("txt") | Some("md") => fs::read_to_string(&file_path_owned)
+                                .context("Failed to read text/markdown file")?,
+                            Some("html") => {
+                                let html_content = fs::read_to_string(&file_path_owned)
+                                    .context("Failed to read HTML file")?;
+                                Html::parse_document(&html_content)
+                                    .select(&Selector::parse("body").unwrap())
+                                    .next()
+                                    .map(|element| element.text().collect::<String>())
+                                    .unwrap_or_else(|| "".to_string())
+                            }
+                            Some("pdf") => Self::extract_text_from_pdf(&file_path_owned)?,
+                            _ => Err(anyhow!(
+                                "Unsupported file type for indexing: {:?}",
+                                file_path_owned
+                            ))?,
+                        };
+                        let extracted_tags = tag_regex
+                            .captures_iter(&content)
+                            .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_lowercase()))
+                            .collect();
+                        let num_doc_tokens = crate::tokenizer::tokenize(&content).len();
+
+                        docs_to_add_or_update_details.push(Document {
+                            id: *existing_doc_id,
+                            path: file_path_owned.clone(),
+                            content,
+                            title: file_path_owned
+                                .file_stem()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string(),
+                            tags: extracted_tags,
+                            num_tokens: num_doc_tokens,
+                            modified_time: current_modified_time,
+                        });
+                    }
+                }
+            } else {
+                println!("Adding new document: {:?}", file_path_owned);
+                let content = match file_path_owned.extension().and_then(|ext| ext.to_str()) {
+                    Some("txt") | Some("md") => fs::read_to_string(&file_path_owned)
                         .context("Failed to read text/markdown file")?,
                     Some("html") => {
-                        let html_content =
-                            fs::read_to_string(&file_path).context("Failed to read HTML file")?;
-                        let document = Html::parse_document(&html_content);
-                        let selector = Selector::parse("body")
-                            .map_err(|e| anyhow!("HTML Selector parse error: {}", e))?;
-                        document
-                            .select(&selector)
+                        let html_content = fs::read_to_string(&file_path_owned)
+                            .context("Failed to read HTML file")?;
+                        Html::parse_document(&html_content)
+                            .select(&Selector::parse("body").unwrap())
                             .next()
                             .map(|element| element.text().collect::<String>())
                             .unwrap_or_else(|| "".to_string())
                     }
-                    Some("pdf") => Self::extract_text_from_pdf(&file_path)?,
+                    Some("pdf") => Self::extract_text_from_pdf(&file_path_owned)?,
                     _ => Err(anyhow!(
                         "Unsupported file type for indexing: {:?}",
-                        file_path
+                        file_path_owned
                     ))?,
                 };
+                let extracted_tags = tag_regex
+                    .captures_iter(&content)
+                    .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_lowercase()))
+                    .collect();
+                let num_doc_tokens = crate::tokenizer::tokenize(&content).len();
 
-                // Extract tags from content
-                let mut extracted_tags = Vec::new();
-                for cap in tag_regex.captures_iter(&content) {
-                    if let Some(tag_match) = cap.get(1) {
-                        extracted_tags.push(tag_match.as_str().to_lowercase());
-                    }
-                }
-
-                let tokens_for_count = crate::tokenizer::tokenize(&content);
-                let num_doc_tokens = tokens_for_count.len();
-
-                let doc = Document {
-                    id: doc_id,
-                    path: file_path.clone(),
-                    content: content,
-                    title: title,
+                let new_doc_id = self.next_doc_id.fetch_add(1, Ordering::SeqCst);
+                docs_to_add_or_update_details.push(Document {
+                    id: new_doc_id,
+                    path: file_path_owned.clone(),
+                    content,
+                    title: file_path_owned
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string(),
                     tags: extracted_tags,
                     num_tokens: num_doc_tokens,
-                };
-
-                let tokens_with_positions = tokens_for_count;
-                let mut partial_index_entries: HashMap<String, Vec<usize>> = HashMap::new();
-                for (token, pos) in tokens_with_positions {
-                    partial_index_entries
-                        .entry(token)
-                        .or_insert_with(Vec::new)
-                        .push(pos);
-                }
-                Ok((doc, partial_index_entries))
-            })
-            .collect::<Vec<ProcessedDocumentResult>>();
-
-        let mut new_docs_count = 0;
-        for result in results {
-            let (doc, partial_index_entries) = result?;
-            let doc_id = doc.id;
-            total_tokens_for_avg_calc += doc.num_tokens;
-
-            self.documents.insert(doc_id, doc.clone());
-
-            for (token, positions) in partial_index_entries {
-                self.index
-                    .entry(token)
-                    .or_insert_with(Vec::new)
-                    .push((doc_id, positions));
+                    modified_time: current_modified_time,
+                });
             }
-
-            for tag in &doc.tags {
-                self.tags
-                    .entry(tag.clone())
-                    .or_insert_with(Vec::new)
-                    .push(doc_id);
-            }
-
-            new_docs_count += 1;
         }
 
-        self.total_docs += new_docs_count;
+        for doc_id in doc_ids_to_remove {
+            self.remove_document(doc_id);
+        }
+
+        for doc_details in docs_to_add_or_update_details {
+            self.add_document(doc_details);
+        }
+
+        self.total_docs = self.documents.len();
+        let mut total_tokens: usize = 0;
+        for doc in self.documents.values() {
+            total_tokens += doc.num_tokens;
+        }
+
         if self.total_docs > 0 {
-            self.avg_doc_length = total_tokens_for_avg_calc as f64 / self.total_docs as f64;
+            self.avg_doc_length = total_tokens as f64 / self.total_docs as f64;
         } else {
             self.avg_doc_length = 0.0;
         }
