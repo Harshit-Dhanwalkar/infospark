@@ -14,6 +14,7 @@ Infospark currently includes the following functionalities:
 - **Highlighted Snippets:** Provides contextual snippets in search results with query terms highlighted for easy readability.
 - **Parallel Document Indexing:** Utilizes Rust's concurrency features (via `rayon`) to speed up the initial document loading and indexing process.
 - **Search Result Caching (LRU):** Employs a Least Recently Used (LRU) cache to store and quickly retrieve results for frequent queries.
+- **Multi-format Document Support**: Indexes and searches across plain text (`.txt`), Markdown (`.md`), HTML (`.html`), and PDF (`.pdf`) documents.
 
 ## Getting Started
 
@@ -40,6 +41,10 @@ Infospark currently includes the following functionalities:
     ├── corpus/
     │   ├── doc_a.txt
     │   ├── doc_b.txt
+    │   ├── doc_c.txt
+    │   ├── doc_d.md
+    │   ├── doc_e.html
+    │   ├── doc_f.pdf
     │   └── ...
     ├── Cargo.toml
     └── Cargo.lock
@@ -54,21 +59,7 @@ Infospark currently includes the following functionalities:
     - **Subsequent Runs:** The program will quickly load the existing `search_index.bin` file, saving the re-indexing time.
 
 4.  **Interact:**
-    After indexing/loading, you will be prompted to enter search queries. Type your query and press Enter. Type `exit` to quit the application.
-
-## Planned Future Enhancements
-
-We are continually looking to improve Infospark. Here are some features planned for future development:
-
-- **Full Phrase Search Logic:** Implement the complete algorithm for matching exact phrases in queries (e.g., `"rust programming"`).
-- **Boolean Operators:** Introduce support for `AND`, `OR`, and `NOT` operators in queries.
-- **Fuzzy Matching / Typo Tolerance:** Improve search resilience to misspellings and typos.
-- **More Advanced Ranking:** Integrate sophisticated ranking algorithms like Okapi BM25 for even more relevant search results.
-- **Field-Specific Search:** Allow users to limit searches to specific document fields (e.g., `title:query`).
-- **Support for More File Types:** Expand indexing capabilities beyond `.txt` to include formats like Markdown (`.md`), HTML (`.html`), PDF (`.pdf`), and more.
-- **Incremental Indexing:** Develop a mechanism to only re-index new or changed documents, significantly reducing indexing time for updated corpora.
-- **Document Deletion / Updates:** Add functionality to dynamically remove or update documents within the existing index.
-- **Configurable Paths:** Allow users to specify custom paths for the corpus directory and index file.
+    After indexing/loading, you will be prompted to enter search queries. Type your query and press Enter. You can use exact phrases ("`multi word query`"), wildcard terms (`pro*`), or allow fuzzy matching for single-word typos. Type `exit` to quit the application.
 
 ## Contributing
 
