@@ -1,9 +1,7 @@
 // src/inverted_index.rs
 
 use std::collections::HashMap;
-use std::error::Error as StdError;
 use std::fs;
-use std::io;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -28,6 +26,8 @@ use anyhow::{Context, Result, anyhow};
 
 // --- CONSTANTS ---
 const FUZZY_THRESHOLD: usize = 2;
+const BM25_K1: f64 = 1.2;
+const BM25_B: f64 = 0.75;
 
 // --- TYPE ALIASES ---
 type TermPostings = Vec<(u32, Vec<usize>)>;
@@ -42,6 +42,7 @@ pub struct Document {
     pub content: String, // Storing processed plain text content
     pub title: String,
     pub tags: Vec<String>, // Field to store extracted tags
+    pub num_tokens: usize, // Number of tokens in the document
 }
 
 #[derive(Debug, Clone)]
@@ -65,7 +66,8 @@ pub struct InvertedIndex {
     tags: HashMap<String, Vec<u32>>,
     #[serde(skip)]
     next_doc_id: AtomicU32,
-    total_docs: usize,
+    pub total_docs: usize,
+    pub avg_doc_length: f64,
     #[serde(skip, default = "default_search_cache")]
     search_cache: Arc<Mutex<LruCache<String, Vec<SearchResult>>>>,
     cache_capacity: usize,
@@ -81,6 +83,7 @@ impl InvertedIndex {
             tags: HashMap::new(),
             next_doc_id: AtomicU32::new(1),
             total_docs: 0,
+            avg_doc_length: 0.0,
             search_cache: Arc::new(Mutex::new(LruCache::new(non_zero_capacity))),
             cache_capacity: DEFAULT_CACHE_CAPACITY,
         }
@@ -116,6 +119,7 @@ impl InvertedIndex {
             content: doc.content,
             title: doc.title,
             tags: doc.tags.clone(),
+            num_tokens: doc.num_tokens,
         };
 
         // Index document content
@@ -135,6 +139,7 @@ impl InvertedIndex {
                 .push((doc_id, positions));
         }
 
+        // Index document tags
         for tag in &current_doc.tags {
             self.tags
                 .entry(tag.clone())
@@ -165,6 +170,7 @@ impl InvertedIndex {
         }
 
         let results = if query.starts_with('#') {
+            // Handle tag search
             let tag_name = query[1..].trim().to_lowercase();
             if tag_name.is_empty() {
                 return Vec::new();
@@ -254,7 +260,6 @@ impl InvertedIndex {
                 fuzzy_matches.push((indexed_term.clone(), distance));
             }
         }
-        // Sort by distance so closest matches are considered first
         fuzzy_matches.sort_by_key(|(_, distance)| *distance);
         fuzzy_matches
     }
@@ -269,7 +274,6 @@ impl InvertedIndex {
 
         for (token, is_wildcard_origin) in processed_query_terms {
             if let Some(doc_entries) = self.index.get(token) {
-                // Exact match
                 for (doc_id, positions) in doc_entries {
                     candidate_docs
                         .entry(*doc_id)
@@ -280,7 +284,6 @@ impl InvertedIndex {
                 if !is_wildcard_origin {
                     let matches = self.find_fuzzy_matches(token);
                     if let Some((closest_match, distance)) = matches.into_iter().next() {
-                        // Take the closest one
                         if let Some(doc_entries) = self.index.get(&closest_match) {
                             for (doc_id, positions) in doc_entries {
                                 candidate_docs
@@ -306,22 +309,6 @@ impl InvertedIndex {
                 }
             }
         }
-
-        let unique_matched_terms: Vec<String> = processed_query_terms
-            .iter()
-            .filter_map(|(token, is_wildcard_origin)| {
-                if candidate_docs
-                    .iter()
-                    .any(|(_, term_map)| term_map.contains_key(token))
-                {
-                    Some(token.clone())
-                } else if !is_wildcard_origin {
-                    fuzzy_matched_terms.get(token).cloned()
-                } else {
-                    None
-                }
-            })
-            .collect();
 
         let mut intersection_results: HashMap<u32, HashMap<String, Vec<usize>>> = HashMap::new();
         for (doc_id, term_map) in candidate_docs {
@@ -349,6 +336,11 @@ impl InvertedIndex {
 
         for (doc_id, term_frequencies_and_pos) in intersection_results {
             let mut score = 0.0;
+            let doc_len = self
+                .documents
+                .get(&doc_id)
+                .map_or(0.0, |d| d.num_tokens as f64);
+
             for (q_token_original, is_wildcard_origin) in processed_query_terms {
                 let actual_term = if *is_wildcard_origin {
                     q_token_original
@@ -368,14 +360,21 @@ impl InvertedIndex {
 
                 let num_docs_with_term = self.index.get(actual_term).map_or(0, |v| v.len()) as f64;
 
-                let idf = if num_docs_with_term > 0.0 {
-                    (self.total_docs as f64 / num_docs_with_term).log10()
-                } else {
-                    0.0
-                };
+                // BM25 IDF calculation
+                let idf = ((self.total_docs as f64 - num_docs_with_term + 0.5)
+                    / (num_docs_with_term + 0.5)
+                    + 1.0)
+                    .log10();
 
-                let mut term_score = tf * idf;
+                // BM25 Term Frequency component calculation
+                let term_freq_comp = (tf * (BM25_K1 + 1.0))
+                    / (tf
+                        + BM25_K1
+                            * (1.0 - BM25_B + BM25_B * (doc_len / self.avg_doc_length.max(1.0))));
 
+                let mut term_score = idf * term_freq_comp;
+
+                // Penalize fuzzy matches
                 if !is_wildcard_origin && fuzzy_matched_terms.contains_key(q_token_original) {
                     term_score *= 0.5;
                 }
@@ -620,7 +619,6 @@ impl InvertedIndex {
             return Err(anyhow!("Provided path is not a directory"));
         }
 
-        // Tag regex for extraction
         let tag_regex = regex::Regex::new(r"#(\w+)").unwrap();
 
         let file_paths = fs::read_dir(path)?
@@ -631,10 +629,7 @@ impl InvertedIndex {
                     let extension = file_path.extension().and_then(|s| s.to_str());
                     match extension {
                         Some("txt") | Some("md") | Some("html") | Some("pdf") => Some(file_path),
-                        _ => {
-                            println!("Skipping unsupported file type: {:?}", file_path);
-                            None
-                        }
+                        _ => None,
                     }
                 } else {
                     None
@@ -643,6 +638,7 @@ impl InvertedIndex {
             .collect::<Vec<PathBuf>>();
 
         let temp_next_doc_id = AtomicU32::new(self.next_doc_id.load(Ordering::SeqCst));
+        let mut total_tokens_for_avg_calc: usize = 0;
 
         let results = file_paths
             .iter()
@@ -684,15 +680,19 @@ impl InvertedIndex {
                     }
                 }
 
+                let tokens_for_count = crate::tokenizer::tokenize(&content);
+                let num_doc_tokens = tokens_for_count.len();
+
                 let doc = Document {
                     id: doc_id,
                     path: file_path.clone(),
                     content: content,
                     title: title,
-                    tags: extracted_tags, // Assign extracted tags to the document
+                    tags: extracted_tags,
+                    num_tokens: num_doc_tokens,
                 };
 
-                let tokens_with_positions = crate::tokenizer::tokenize(&doc.content);
+                let tokens_with_positions = tokens_for_count;
                 let mut partial_index_entries: HashMap<String, Vec<usize>> = HashMap::new();
                 for (token, pos) in tokens_with_positions {
                     partial_index_entries
@@ -708,6 +708,7 @@ impl InvertedIndex {
         for result in results {
             let (doc, partial_index_entries) = result?;
             let doc_id = doc.id;
+            total_tokens_for_avg_calc += doc.num_tokens;
 
             self.documents.insert(doc_id, doc.clone());
 
@@ -729,7 +730,12 @@ impl InvertedIndex {
         }
 
         self.total_docs += new_docs_count;
-        self.next_doc_id = temp_next_doc_id;
+        if self.total_docs > 0 {
+            self.avg_doc_length = total_tokens_for_avg_calc as f64 / self.total_docs as f64;
+        } else {
+            self.avg_doc_length = 0.0;
+        }
+
         self.clear_cache();
         Ok(())
     }
