@@ -27,7 +27,7 @@ use pdf_extract::extract_text;
 use anyhow::{Context, Result, anyhow};
 
 // --- CONSTANTS ---
-const FUZZY_THRESHOLD: usize = 2; // Maximum Levenshtein distance for fuzzy matching
+const FUZZY_THRESHOLD: usize = 2;
 
 // --- TYPE ALIASES ---
 type TermPostings = Vec<(u32, Vec<usize>)>;
@@ -155,12 +155,51 @@ impl InvertedIndex {
             let phrase_content = &query[1..query.len() - 1];
             self.perform_phrase_search_and_rank(phrase_content, query)
         } else {
-            let query_tokens_with_pos = crate::tokenizer::tokenize(query);
-            let query_tokens: Vec<String> = query_tokens_with_pos
-                .iter()
-                .map(|(s, _)| s.clone())
-                .collect();
-            self.perform_keyword_search_and_rank(&query_tokens, query)
+            let mut processed_query_terms: Vec<(String, bool)> = Vec::new();
+
+            // Split the query by whitespace to preserve '*' for initial check
+            for raw_word in query.to_lowercase().split_whitespace() {
+                let clean_word =
+                    raw_word.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '*');
+
+                if clean_word.ends_with('*') && clean_word.len() > 1 {
+                    let prefix = &clean_word[0..clean_word.len() - 1];
+                    let stemmed_prefix_tokens = crate::tokenizer::tokenize(prefix);
+
+                    let mut found_wildcard_matches = false;
+                    for (stemmed_prefix_part, _) in stemmed_prefix_tokens {
+                        for indexed_term in self.index.keys() {
+                            if indexed_term.starts_with(&stemmed_prefix_part) {
+                                processed_query_terms.push((indexed_term.clone(), true));
+                                found_wildcard_matches = true;
+                            }
+                        }
+                    }
+                    if !found_wildcard_matches {
+                        println!(
+                            "Note: No terms found for wildcard query '{}'",
+                            raw_word.yellow()
+                        );
+                        if query.split_whitespace().count() == 1 && processed_query_terms.is_empty()
+                        {
+                            return Vec::new();
+                        }
+                    }
+                } else {
+                    let normal_tokens = crate::tokenizer::tokenize(clean_word);
+                    for (token, _) in normal_tokens {
+                        if !token.is_empty() {
+                            processed_query_terms.push((token, false));
+                        }
+                    }
+                }
+            }
+
+            if processed_query_terms.is_empty() {
+                return Vec::new();
+            }
+
+            self.perform_keyword_search_and_rank(&processed_query_terms, query)
         };
 
         {
@@ -180,20 +219,20 @@ impl InvertedIndex {
                 fuzzy_matches.push((indexed_term.clone(), distance));
             }
         }
-        // Sort by distance so closest matches are considered first (optional)
+        // Sort by distance so closest matches are considered first
         fuzzy_matches.sort_by_key(|(_, distance)| *distance);
         fuzzy_matches
     }
 
     fn perform_keyword_search_and_rank(
         &self,
-        query_tokens: &[String],
+        processed_query_terms: &[(String, bool)],
         _original_query: &str,
     ) -> Vec<SearchResult> {
         let mut candidate_docs: HashMap<u32, HashMap<String, Vec<usize>>> = HashMap::new();
-        let mut fuzzy_matched_terms: HashMap<String, String> = HashMap::new(); // query_token -> actual_matched_term
+        let mut fuzzy_matched_terms: HashMap<String, String> = HashMap::new();
 
-        for token in query_tokens {
+        for (token, is_wildcard_origin) in processed_query_terms {
             if let Some(doc_entries) = self.index.get(token) {
                 // Exact match
                 for (doc_id, positions) in doc_entries {
@@ -203,46 +242,69 @@ impl InvertedIndex {
                         .insert(token.clone(), positions.clone());
                 }
             } else {
-                // No exact match, try fuzzy matching
-                let matches = self.find_fuzzy_matches(token);
-                if let Some((closest_match, distance)) = matches.into_iter().next() {
-                    // Take the closest one
-                    if let Some(doc_entries) = self.index.get(&closest_match) {
-                        for (doc_id, positions) in doc_entries {
-                            candidate_docs
-                                .entry(*doc_id)
-                                .or_insert_with(HashMap::new)
-                                .insert(closest_match.clone(), positions.clone()); // Store with actual matched term
+                if !is_wildcard_origin {
+                    let matches = self.find_fuzzy_matches(token);
+                    if let Some((closest_match, distance)) = matches.into_iter().next() {
+                        // Take the closest one
+                        if let Some(doc_entries) = self.index.get(&closest_match) {
+                            for (doc_id, positions) in doc_entries {
+                                candidate_docs
+                                    .entry(*doc_id)
+                                    .or_insert_with(HashMap::new)
+                                    .insert(closest_match.clone(), positions.clone());
+                            }
+                            fuzzy_matched_terms.insert(token.clone(), closest_match.clone());
+                            println!(
+                                "Note: Fuzzy matched '{}' to '{}' (distance: {})",
+                                token.yellow(),
+                                closest_match.yellow(),
+                                distance
+                            );
+                        } else {
                         }
-                        fuzzy_matched_terms.insert(token.clone(), closest_match.clone());
-                        println!(
-                            "Note: Fuzzy matched '{}' to '{}' (distance: {})",
-                            token.yellow(),
-                            closest_match.yellow(),
-                            distance
-                        );
                     } else {
-                        return Vec::new();
+                        println!(
+                            "No matches (exact or fuzzy) found for term: {}",
+                            token.red()
+                        );
+                        if processed_query_terms.len() == 1 {
+                            return Vec::new();
+                        }
                     }
                 } else {
-                    println!(
-                        "No matches (exact or fuzzy) found for term: {}",
-                        token.red()
-                    );
-                    return Vec::new();
                 }
             }
         }
 
+        let unique_matched_terms: Vec<String> = processed_query_terms
+            .iter()
+            .filter_map(|(token, is_wildcard_origin)| {
+                if candidate_docs
+                    .iter()
+                    .any(|(_, term_map)| term_map.contains_key(token))
+                {
+                    Some(token.clone())
+                } else if !is_wildcard_origin {
+                    fuzzy_matched_terms.get(token).cloned()
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         let mut intersection_results: HashMap<u32, HashMap<String, Vec<usize>>> = HashMap::new();
         for (doc_id, term_map) in candidate_docs {
             let mut all_terms_present = true;
-            for q_token in query_tokens {
-                // Check if the original query token or its fuzzy match is present
-                if !term_map.contains_key(q_token)
-                    && !term_map
-                        .contains_key(fuzzy_matched_terms.get(q_token).unwrap_or(&String::new()))
-                {
+            for (q_token_original, is_wildcard_origin) in processed_query_terms {
+                let actual_term = if *is_wildcard_origin {
+                    q_token_original
+                } else {
+                    fuzzy_matched_terms
+                        .get(q_token_original)
+                        .unwrap_or(q_token_original)
+                };
+
+                if !term_map.contains_key(actual_term) {
                     all_terms_present = false;
                     break;
                 }
@@ -256,8 +318,14 @@ impl InvertedIndex {
 
         for (doc_id, term_frequencies_and_pos) in intersection_results {
             let mut score = 0.0;
-            for q_token in query_tokens {
-                let actual_term = fuzzy_matched_terms.get(q_token).unwrap_or(q_token); // Use fuzzy matched term if available
+            for (q_token_original, is_wildcard_origin) in processed_query_terms {
+                let actual_term = if *is_wildcard_origin {
+                    q_token_original
+                } else {
+                    fuzzy_matched_terms
+                        .get(q_token_original)
+                        .unwrap_or(q_token_original)
+                };
 
                 let tf = term_frequencies_and_pos
                     .get(actual_term)
@@ -277,8 +345,7 @@ impl InvertedIndex {
 
                 let mut term_score = tf * idf;
 
-                // Penalize fuzzy matches
-                if fuzzy_matched_terms.contains_key(q_token) {
+                if !is_wildcard_origin && fuzzy_matched_terms.contains_key(q_token_original) {
                     term_score *= 0.5;
                 }
 
@@ -289,9 +356,18 @@ impl InvertedIndex {
 
         ranked_results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        let terms_to_highlight: Vec<String> = query_tokens
+        let terms_for_snippet_highlighting: Vec<String> = processed_query_terms
             .iter()
-            .map(|q_token| fuzzy_matched_terms.get(q_token).unwrap_or(q_token).clone())
+            .filter_map(|(token, is_wildcard_origin)| {
+                if *is_wildcard_origin {
+                    Some(token.clone())
+                } else {
+                    fuzzy_matched_terms
+                        .get(token)
+                        .cloned()
+                        .or(Some(token.clone()))
+                }
+            })
             .collect();
 
         ranked_results
@@ -301,9 +377,8 @@ impl InvertedIndex {
                     let content_lower = doc.content.to_lowercase();
 
                     let mut first_match_idx = None;
-                    for q_token in &terms_to_highlight {
-                        // Iterate over the actual terms to highlight
-                        if let Some(idx) = content_lower.find(q_token) {
+                    for highlight_term in &terms_for_snippet_highlighting {
+                        if let Some(idx) = content_lower.find(highlight_term) {
                             first_match_idx = Some(idx);
                             break;
                         }
@@ -311,8 +386,9 @@ impl InvertedIndex {
 
                     let snippet = if let Some(start_char_idx) = first_match_idx {
                         let context_start = start_char_idx.saturating_sub(50);
-                        let context_end = (start_char_idx + terms_to_highlight[0].len() + 50)
-                            .min(content_lower.len()); // Adjust based on first highlighted term
+                        let context_end =
+                            (start_char_idx + terms_for_snippet_highlighting[0].len() + 50)
+                                .min(content_lower.len());
 
                         let mut byte_start = 0;
                         for (i, (byte_idx, _)) in doc.content.char_indices().enumerate() {
@@ -332,7 +408,7 @@ impl InvertedIndex {
                         let snippet_text = &doc.content[byte_start..byte_end];
                         let mut highlighted_snippet = snippet_text.to_string();
 
-                        for term_to_highlight in &terms_to_highlight {
+                        for term_to_highlight in &terms_for_snippet_highlighting {
                             let re_str = format!(r"(?i)\b{}\b", regex::escape(term_to_highlight));
                             let re = regex::Regex::new(&re_str).unwrap();
 
